@@ -21,11 +21,24 @@ import (
 	"strings"
 )
 
+// Location is one URI prefix within a Route. Empty Locations means the
+// Route is a catch-all for the host. Strip rewrites the request to
+// remove the prefix before forwarding — useful when a generic upstream
+// (static nginx) expects root-relative URIs.
+type Location struct {
+	Path  string `json:"path"`
+	Strip bool   `json:"strip,omitempty"`
+}
+
 // Route is one host → upstream mapping. TLS is on when Provider is set.
 type Route struct {
 	App      string `json:"app"`
 	Host     string `json:"host"`
 	Upstream string `json:"upstream"`
+
+	// Locations, when non-empty, produces one Caddy route per entry with
+	// a path matcher. Empty means a single catch-all route for Host.
+	Locations []Location `json:"locations,omitempty"`
 
 	// TLSProvider is "" (HTTP-only), or "letsencrypt" / "internal".
 	// Email is forwarded to Caddy's ACME issuer when Provider is an ACME

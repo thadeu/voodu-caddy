@@ -130,6 +130,93 @@ func TestBuildCaddyConfig_OnDemandWithoutProviderEmitsPolicy(t *testing.T) {
 	mustContain(t, blob, `"subjects":["*.example.com"]`)
 }
 
+func TestBuildCaddyConfig_LocationsPreserveAndStrip(t *testing.T) {
+	routes := []Route{
+		{
+			App:      "api",
+			Host:     "api.example.com",
+			Upstream: "api:3000",
+			Locations: []Location{
+				{Path: "/api/v1"},
+				{Path: "/api/v2"},
+			},
+		},
+		{
+			App:      "docs",
+			Host:     "example.com",
+			Upstream: "docs:80",
+			Locations: []Location{
+				{Path: "/docs/voodu", Strip: true},
+			},
+		},
+	}
+
+	blob := marshal(t, BuildCaddyConfig(routes))
+
+	// Two routes for api (v1, v2) + one for docs → 3 routes total under
+	// the voodu server. Each emits its own "terminal":true entry, so
+	// count those as a proxy for route count.
+	if got := strings.Count(blob, `"terminal":true`); got != 3 {
+		t.Errorf("expected 3 terminal routes (2 api locations + 1 docs), got %d: %s", got, blob)
+	}
+
+	// Both patterns emitted per location — exact prefix + subpaths.
+	mustContain(t, blob, `"path":["/api/v1","/api/v1/*"]`)
+	mustContain(t, blob, `"path":["/api/v2","/api/v2/*"]`)
+	mustContain(t, blob, `"path":["/docs/voodu","/docs/voodu/*"]`)
+
+	// Strip emits a rewrite handler BEFORE reverse_proxy.
+	mustContain(t, blob, `"strip_path_prefix":"/docs/voodu"`)
+
+	// Non-strip locations must NOT get a rewrite handler (otherwise the
+	// upstream would see a mangled URI).
+	if strings.Contains(blob, `"strip_path_prefix":"/api/v1"`) {
+		t.Errorf("unexpected rewrite on non-strip location: %s", blob)
+	}
+}
+
+func TestBuildCaddyConfig_RootPathIsCatchAll(t *testing.T) {
+	// path = "/" or "" collapses to a host-only route. Keeps the HCL
+	// `location { path = "/" }` shape equivalent to omitting location
+	// entirely, without surprising the operator.
+	routes := []Route{
+		{
+			App: "api", Host: "api.example.com", Upstream: "api:3000",
+			Locations: []Location{{Path: "/"}},
+		},
+	}
+
+	blob := marshal(t, BuildCaddyConfig(routes))
+
+	if strings.Contains(blob, `"path"`) {
+		t.Errorf("root path should not emit a path matcher: %s", blob)
+	}
+
+	mustContain(t, blob, `"host":["api.example.com"]`)
+}
+
+func TestBuildCaddyConfig_VersionedAPIFanOut(t *testing.T) {
+	// Two services sharing a host, each owning a path prefix — the
+	// canonical versioned-API example from the docs.
+	routes := []Route{
+		{
+			App: "api-v1", Host: "api.example.com", Upstream: "api-v1:3000",
+			Locations: []Location{{Path: "/api/v1"}},
+		},
+		{
+			App: "api-v2", Host: "api.example.com", Upstream: "api-v2:3000",
+			Locations: []Location{{Path: "/api/v2"}},
+		},
+	}
+
+	blob := marshal(t, BuildCaddyConfig(routes))
+
+	mustContain(t, blob, `"dial":"api-v1:3000"`)
+	mustContain(t, blob, `"dial":"api-v2:3000"`)
+	mustContain(t, blob, `"path":["/api/v1","/api/v1/*"]`)
+	mustContain(t, blob, `"path":["/api/v2","/api/v2/*"]`)
+}
+
 func TestUpstreamForPort(t *testing.T) {
 	up, err := UpstreamForPort("api", 3000)
 	if err != nil || up != "api:3000" {

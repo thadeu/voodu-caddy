@@ -34,7 +34,7 @@ func BuildCaddyConfig(routes []Route) map[string]any {
 	httpRoutes := make([]map[string]any, 0, len(routes))
 
 	for _, r := range routes {
-		httpRoutes = append(httpRoutes, caddyRoute(r))
+		httpRoutes = append(httpRoutes, caddyRoutesFor(r)...)
 	}
 
 	cfg := map[string]any{
@@ -57,26 +57,91 @@ func BuildCaddyConfig(routes []Route) map[string]any {
 	return cfg
 }
 
-// caddyRoute is the JSON shape Caddy expects for one reverse-proxy route.
-// Pinned to the fields we actually use so accidental drift is loud.
-// Host header is preserved by Caddy v2's reverse_proxy default, so we
-// don't set it explicitly — the on-demand ask gate reads the SNI, not
-// the upstream Host, so this is safe for multi-tenant routes too.
-func caddyRoute(r Route) map[string]any {
+// caddyRoutesFor expands a Route into one or more Caddy routes. Without
+// Locations, a single catch-all route matches the host. With
+// Locations, each entry becomes its own route with a path matcher, in
+// declaration order. Caddy walks routes top-to-bottom and the first
+// match wins (`terminal: true`), so more specific prefixes should come
+// first — the controller preserves declaration order, callers declare
+// the most specific prefix first.
+func caddyRoutesFor(r Route) []map[string]any {
+	if len(r.Locations) == 0 {
+		return []map[string]any{hostRoute(r)}
+	}
+
+	out := make([]map[string]any, 0, len(r.Locations))
+
+	for _, loc := range r.Locations {
+		out = append(out, locationRoute(r, loc))
+	}
+
+	return out
+}
+
+// hostRoute is the catch-all shape: match on host only, reverse_proxy
+// everything. Pinned to the fields we actually use so accidental drift
+// is loud. Host header is preserved by Caddy v2's reverse_proxy default,
+// so we don't set it explicitly — the on-demand ask gate reads the SNI,
+// not the upstream Host, so this is safe for multi-tenant routes too.
+func hostRoute(r Route) map[string]any {
 	return map[string]any{
 		"match": []map[string]any{
 			{"host": []string{r.Host}},
 		},
-		"handle": []map[string]any{
-			{
-				"handler": "reverse_proxy",
-				"upstreams": []map[string]any{
-					{"dial": r.Upstream},
-				},
-			},
-		},
+		"handle":   []map[string]any{reverseProxyHandler(r.Upstream)},
 		"terminal": true,
 	}
+}
+
+// locationRoute matches host + path prefix. Caddy's path matcher uses
+// shell globs, so "/api/v1" matches only exactly that. To match both
+// the exact prefix and everything under it ("/api/v1/foo"), we emit
+// both patterns. Strip rewrites the request to remove the prefix
+// before the upstream sees it.
+func locationRoute(r Route, loc Location) map[string]any {
+	// A root path or empty string is a catch-all under this host — same
+	// shape as hostRoute, so fall through to that.
+	if loc.Path == "" || loc.Path == "/" {
+		return hostRoute(r)
+	}
+
+	match := map[string]any{
+		"host": []string{r.Host},
+		"path": pathPatterns(loc.Path),
+	}
+
+	handlers := []map[string]any{}
+
+	if loc.Strip {
+		handlers = append(handlers, map[string]any{
+			"handler":           "rewrite",
+			"strip_path_prefix": loc.Path,
+		})
+	}
+
+	handlers = append(handlers, reverseProxyHandler(r.Upstream))
+
+	return map[string]any{
+		"match":    []map[string]any{match},
+		"handle":   handlers,
+		"terminal": true,
+	}
+}
+
+func reverseProxyHandler(upstream string) map[string]any {
+	return map[string]any{
+		"handler": "reverse_proxy",
+		"upstreams": []map[string]any{
+			{"dial": upstream},
+		},
+	}
+}
+
+// pathPatterns expands "/api/v1" into ["/api/v1", "/api/v1/*"] so both
+// the exact prefix and everything beneath it match. Without the second
+// pattern, "/api/v1/foo" would not match.
+func pathPatterns(p string) []string {
+	return []string{p, p + "/*"}
 }
 
 // tlsAppConfig assembles the whole `apps.tls` block. Returns nil when

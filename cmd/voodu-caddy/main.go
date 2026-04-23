@@ -48,9 +48,10 @@ const (
 	envIngressTLS      = "VOODU_INGRESS_TLS"
 	envIngressProvider = "VOODU_INGRESS_TLS_PROVIDER"
 	envIngressEmail    = "VOODU_INGRESS_TLS_EMAIL"
-	envIngressOnDemand = "VOODU_INGRESS_TLS_ON_DEMAND"
-	envIngressAsk      = "VOODU_INGRESS_TLS_ASK"
-	envCaddyAdminURL   = "VOODU_CADDY_ADMIN_URL"
+	envIngressOnDemand  = "VOODU_INGRESS_TLS_ON_DEMAND"
+	envIngressAsk       = "VOODU_INGRESS_TLS_ASK"
+	envIngressLocations = "VOODU_INGRESS_LOCATIONS"
+	envCaddyAdminURL    = "VOODU_CADDY_ADMIN_URL"
 	envCaddyStateDir   = "VOODU_CADDY_STATE_DIR"
 	defaultStateDir    = "/opt/voodu/caddy"
 )
@@ -100,6 +101,8 @@ type runEnv struct {
 	tls                                 bool
 	onDemand                            bool
 	ask                                 string
+	locations                           []ingress.Location
+	locationsErr                        error
 	adminURL, stateDir                  string
 }
 
@@ -111,19 +114,40 @@ func readEnv() runEnv {
 		dir = defaultStateDir
 	}
 
+	locs, locErr := parseLocations(os.Getenv(envIngressLocations))
+
 	return runEnv{
-		app:      os.Getenv(envApp),
-		host:     os.Getenv(envIngressHost),
-		service:  os.Getenv(envIngressService),
-		port:     port,
-		tls:      strings.EqualFold(os.Getenv(envIngressTLS), "true"),
-		provider: os.Getenv(envIngressProvider),
-		email:    os.Getenv(envIngressEmail),
-		onDemand: strings.EqualFold(os.Getenv(envIngressOnDemand), "true"),
-		ask:      os.Getenv(envIngressAsk),
-		adminURL: os.Getenv(envCaddyAdminURL),
-		stateDir: dir,
+		app:          os.Getenv(envApp),
+		host:         os.Getenv(envIngressHost),
+		service:      os.Getenv(envIngressService),
+		port:         port,
+		tls:          strings.EqualFold(os.Getenv(envIngressTLS), "true"),
+		provider:     os.Getenv(envIngressProvider),
+		email:        os.Getenv(envIngressEmail),
+		onDemand:     strings.EqualFold(os.Getenv(envIngressOnDemand), "true"),
+		ask:          os.Getenv(envIngressAsk),
+		locations:    locs,
+		locationsErr: locErr,
+		adminURL:     os.Getenv(envCaddyAdminURL),
+		stateDir:     dir,
 	}
+}
+
+// parseLocations decodes the JSON blob the controller exports for
+// path-based routing. Empty string means "no locations" (catch-all),
+// which is the overwhelmingly common case — not an error.
+func parseLocations(raw string) ([]ingress.Location, error) {
+	if raw == "" {
+		return nil, nil
+	}
+
+	var out []ingress.Location
+
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("%s: invalid JSON: %w", envIngressLocations, err)
+	}
+
+	return out, nil
 }
 
 // cmdApply persists the route then reloads Caddy. The two-phase flow
@@ -135,15 +159,20 @@ func cmdApply(store *ingress.Store, client *caddyapi.Client, e runEnv) error {
 		return fmt.Errorf("%s not set (controller must export the app name)", envApp)
 	}
 
+	if e.locationsErr != nil {
+		return e.locationsErr
+	}
+
 	upstream, err := ingress.UpstreamForPort(e.service, e.port)
 	if err != nil {
 		return err
 	}
 
 	route := ingress.Route{
-		App:      e.app,
-		Host:     e.host,
-		Upstream: upstream,
+		App:       e.app,
+		Host:      e.host,
+		Upstream:  upstream,
+		Locations: e.locations,
 	}
 
 	if e.tls {

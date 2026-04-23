@@ -147,6 +147,121 @@ func TestPluginEndToEnd(t *testing.T) {
 	}
 }
 
+func TestPluginApply_LocationsJSON(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("plugin targets linux/darwin")
+	}
+
+	var loads []map[string]any
+
+	admin := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodPost && r.URL.Path == "/load" {
+			raw, _ := io.ReadAll(r.Body)
+
+			var cfg map[string]any
+			_ = json.Unmarshal(raw, &cfg)
+			loads = append(loads, cfg)
+
+			w.WriteHeader(http.StatusOK)
+
+			return
+		}
+
+		http.NotFound(w, r)
+	}))
+	defer admin.Close()
+
+	stateDir := t.TempDir()
+	bin := buildPluginBinary(t)
+
+	cmd := exec.Command(bin, "apply")
+	cmd.Env = envSlice(map[string]string{
+		"VOODU_CADDY_ADMIN_URL":    admin.URL,
+		"VOODU_CADDY_STATE_DIR":    stateDir,
+		"VOODU_APP":                "docs",
+		"VOODU_INGRESS_HOST":       "example.com",
+		"VOODU_INGRESS_SERVICE":    "docs",
+		"VOODU_INGRESS_PORT":       "80",
+		"VOODU_INGRESS_LOCATIONS":  `[{"path":"/docs/voodu","strip":true},{"path":"/api/v1"}]`,
+	})
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	cmd.Stderr = &stdout
+
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("plugin apply: %v\n%s", err, stdout.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+		t.Fatalf("apply stdout not JSON: %v\nraw: %s", err, stdout.String())
+	}
+
+	if resp["status"] != "ok" {
+		t.Fatalf("apply status: %+v", resp)
+	}
+
+	if len(loads) != 1 {
+		t.Fatalf("expected 1 /load, got %d", len(loads))
+	}
+
+	blob := marshalJSON(t, loads[0])
+
+	// Two path matchers (docs strip + api non-strip), one rewrite.
+	if !strings.Contains(blob, `"path":["/docs/voodu","/docs/voodu/*"]`) {
+		t.Errorf("strip location path missing: %s", blob)
+	}
+
+	if !strings.Contains(blob, `"path":["/api/v1","/api/v1/*"]`) {
+		t.Errorf("non-strip location path missing: %s", blob)
+	}
+
+	if !strings.Contains(blob, `"strip_path_prefix":"/docs/voodu"`) {
+		t.Errorf("rewrite handler missing: %s", blob)
+	}
+}
+
+func TestPluginApply_LocationsInvalidJSON(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("plugin targets linux/darwin")
+	}
+
+	bin := buildPluginBinary(t)
+
+	cmd := exec.Command(bin, "apply")
+	cmd.Env = envSlice(map[string]string{
+		"VOODU_CADDY_ADMIN_URL":    "http://127.0.0.1:0",
+		"VOODU_CADDY_STATE_DIR":    t.TempDir(),
+		"VOODU_APP":                "api",
+		"VOODU_INGRESS_HOST":       "api.example.com",
+		"VOODU_INGRESS_SERVICE":    "api",
+		"VOODU_INGRESS_PORT":       "3000",
+		"VOODU_INGRESS_LOCATIONS":  `not-json`,
+	})
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	err := cmd.Run()
+	if err == nil {
+		t.Fatal("expected non-zero exit")
+	}
+
+	var resp map[string]any
+	if jsonErr := json.Unmarshal(stdout.Bytes(), &resp); jsonErr != nil {
+		t.Fatalf("stdout not JSON: %v\nraw: %s", jsonErr, stdout.String())
+	}
+
+	if resp["status"] != "error" {
+		t.Errorf("status: %v", resp["status"])
+	}
+
+	if !strings.Contains(resp["error"].(string), "VOODU_INGRESS_LOCATIONS") {
+		t.Errorf("error should mention VOODU_INGRESS_LOCATIONS: %v", resp["error"])
+	}
+}
+
 func TestPluginApply_MissingRequiredEnv(t *testing.T) {
 	bin := buildPluginBinary(t)
 
