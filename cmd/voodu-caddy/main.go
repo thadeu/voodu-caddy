@@ -51,6 +51,10 @@ const (
 	envIngressOnDemand  = "VOODU_INGRESS_TLS_ON_DEMAND"
 	envIngressAsk       = "VOODU_INGRESS_TLS_ASK"
 	envIngressLocations = "VOODU_INGRESS_LOCATIONS"
+	envIngressUpstreams = "VOODU_INGRESS_UPSTREAMS"
+	envIngressLBPolicy  = "VOODU_INGRESS_LB_POLICY"
+	envIngressLBInterval = "VOODU_INGRESS_LB_INTERVAL"
+	envIngressHCPath    = "VOODU_INGRESS_HC_PATH"
 	envCaddyAdminURL    = "VOODU_CADDY_ADMIN_URL"
 	envCaddyStateDir   = "VOODU_CADDY_STATE_DIR"
 	defaultStateDir    = "/opt/voodu/caddy"
@@ -103,6 +107,11 @@ type runEnv struct {
 	ask                                 string
 	locations                           []ingress.Location
 	locationsErr                        error
+	upstreams                           []string
+	upstreamsErr                        error
+	lbPolicy                            string
+	lbInterval                          string
+	hcPath                              string
 	adminURL, stateDir                  string
 }
 
@@ -115,6 +124,7 @@ func readEnv() runEnv {
 	}
 
 	locs, locErr := parseLocations(os.Getenv(envIngressLocations))
+	ups, upsErr := parseUpstreams(os.Getenv(envIngressUpstreams))
 
 	return runEnv{
 		app:          os.Getenv(envApp),
@@ -128,9 +138,47 @@ func readEnv() runEnv {
 		ask:          os.Getenv(envIngressAsk),
 		locations:    locs,
 		locationsErr: locErr,
+		upstreams:    ups,
+		upstreamsErr: upsErr,
+		lbPolicy:     os.Getenv(envIngressLBPolicy),
+		lbInterval:   os.Getenv(envIngressLBInterval),
+		hcPath:       os.Getenv(envIngressHCPath),
 		adminURL:     os.Getenv(envCaddyAdminURL),
 		stateDir:     dir,
 	}
+}
+
+// parseUpstreams decodes the JSON array of `host:port` strings the
+// controller emits for multi-replica deployments. Empty string → nil
+// (use single-upstream fallback). Accepts both the JSON array form and
+// a comma-separated fallback so operators can hand-craft tests without
+// the JSON noise.
+func parseUpstreams(raw string) ([]string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+
+	if strings.HasPrefix(raw, "[") {
+		var out []string
+		if err := json.Unmarshal([]byte(raw), &out); err != nil {
+			return nil, fmt.Errorf("%s: invalid JSON: %w", envIngressUpstreams, err)
+		}
+
+		return out, nil
+	}
+
+	// Comma-separated fallback for debug/manual use.
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+
+	return out, nil
 }
 
 // parseLocations decodes the JSON blob the controller exports for
@@ -163,16 +211,27 @@ func cmdApply(store *ingress.Store, client *caddyapi.Client, e runEnv) error {
 		return e.locationsErr
 	}
 
+	if e.upstreamsErr != nil {
+		return e.upstreamsErr
+	}
+
+	// Single-upstream fallback — used when the controller didn't export
+	// VOODU_INGRESS_UPSTREAMS (older controller or single-replica app
+	// where the legacy SERVICE/PORT pair is enough).
 	upstream, err := ingress.UpstreamForPort(e.service, e.port)
 	if err != nil {
 		return err
 	}
 
 	route := ingress.Route{
-		App:       e.app,
-		Host:      e.host,
-		Upstream:  upstream,
-		Locations: e.locations,
+		App:             e.app,
+		Host:            e.host,
+		Upstream:        upstream,
+		Upstreams:       e.upstreams,
+		LBPolicy:        e.lbPolicy,
+		LBInterval:      e.lbInterval,
+		HealthCheckPath: e.hcPath,
+		Locations:       e.locations,
 	}
 
 	if e.tls {

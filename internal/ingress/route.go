@@ -36,6 +36,31 @@ type Route struct {
 	Host     string `json:"host"`
 	Upstream string `json:"upstream"`
 
+	// Upstreams supersedes Upstream when non-empty: the controller emits
+	// one `host:port` string per deployment replica (e.g.
+	// ["api-0:3000", "api-1:3000"]) and Caddy load-balances across them.
+	// When the list is empty we fall back to the single-upstream
+	// behaviour for backward compatibility with older controllers that
+	// don't know about replicas yet.
+	Upstreams []string `json:"upstreams,omitempty"`
+
+	// LBPolicy is Caddy's `load_balancing.selection_policy` value. Empty
+	// defaults to "round_robin". Ignored when Upstreams has 0 or 1
+	// entries (Caddy ignores the policy for single-upstream routes).
+	LBPolicy string `json:"lb_policy,omitempty"`
+
+	// LBInterval, when non-empty, enables Caddy active health checks:
+	// each upstream is GETed at HealthCheckPath every LBInterval, and
+	// unhealthy upstreams leave rotation. Empty disables active probing
+	// (passive observation still applies).
+	LBInterval string `json:"lb_interval,omitempty"`
+
+	// HealthCheckPath is the URI Caddy probes when active HC is enabled.
+	// Propagated from the deployment's `health_check` field so one
+	// declaration drives both docker HEALTHCHECK and ingress-level HC.
+	// Empty falls back to "/".
+	HealthCheckPath string `json:"health_check_path,omitempty"`
+
 	// Locations, when non-empty, produces one Caddy route per entry with
 	// a path matcher. Empty means a single catch-all route for Host.
 	Locations []Location `json:"locations,omitempty"`
@@ -74,7 +99,7 @@ func (r Route) Validate() error {
 		return fmt.Errorf("route %q: host is required", r.App)
 	}
 
-	if r.Upstream == "" {
+	if r.Upstream == "" && len(r.Upstreams) == 0 {
 		return fmt.Errorf("route %q: upstream is required", r.App)
 	}
 

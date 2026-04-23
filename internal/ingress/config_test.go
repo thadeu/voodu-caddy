@@ -221,6 +221,104 @@ func TestBuildCaddyConfig_VersionedAPIFanOut(t *testing.T) {
 	mustContain(t, blob, `"path":["/api/v2","/api/v2/*"]`)
 }
 
+func TestBuildCaddyConfig_MultiUpstreamEmitsLBPolicy(t *testing.T) {
+	// Replicas = 2 → two dials + selection_policy. Default policy is
+	// round_robin when the operator didn't set one explicitly.
+	routes := []Route{
+		{
+			App:       "api",
+			Host:      "api.example.com",
+			Upstreams: []string{"api-0:3000", "api-1:3000"},
+		},
+	}
+
+	blob := marshal(t, BuildCaddyConfig(routes))
+
+	mustContain(t, blob, `"dial":"api-0:3000"`)
+	mustContain(t, blob, `"dial":"api-1:3000"`)
+	mustContain(t, blob, `"selection_policy":{"policy":"round_robin"}`)
+}
+
+func TestBuildCaddyConfig_MultiUpstreamHonorsLBPolicy(t *testing.T) {
+	routes := []Route{
+		{
+			App:       "api",
+			Host:      "api.example.com",
+			Upstreams: []string{"api-0:3000", "api-1:3000"},
+			LBPolicy:  "least_conn",
+		},
+	}
+
+	blob := marshal(t, BuildCaddyConfig(routes))
+
+	mustContain(t, blob, `"selection_policy":{"policy":"least_conn"}`)
+}
+
+func TestBuildCaddyConfig_SingleUpstreamSkipsLBBlock(t *testing.T) {
+	// Single-replica deployments are the common case; emitting a
+	// load_balancing block there is noise. Caddy behaves identically
+	// with or without it, but operators reading the config dump
+	// shouldn't see knobs that don't apply.
+	routes := []Route{
+		{App: "api", Host: "api.example.com", Upstream: "api:3000"},
+	}
+
+	blob := marshal(t, BuildCaddyConfig(routes))
+
+	if strings.Contains(blob, `"load_balancing"`) {
+		t.Errorf("single-upstream route should not carry load_balancing: %s", blob)
+	}
+}
+
+func TestBuildCaddyConfig_ActiveHealthCheckFromInterval(t *testing.T) {
+	routes := []Route{
+		{
+			App:             "api",
+			Host:            "api.example.com",
+			Upstreams:       []string{"api-0:3000", "api-1:3000"},
+			LBInterval:      "5s",
+			HealthCheckPath: "/healthz",
+		},
+	}
+
+	blob := marshal(t, BuildCaddyConfig(routes))
+
+	mustContain(t, blob, `"health_checks":{"active":{`)
+	mustContain(t, blob, `"uri":"/healthz"`)
+	mustContain(t, blob, `"interval":"5s"`)
+}
+
+func TestBuildCaddyConfig_ActiveHealthCheckDefaultsPath(t *testing.T) {
+	// LBInterval without HealthCheckPath → probe "/" (Caddy's own
+	// default). We fill it in explicitly so the config dump is
+	// self-describing.
+	routes := []Route{
+		{
+			App:        "api",
+			Host:       "api.example.com",
+			Upstreams:  []string{"api-0:3000"},
+			LBInterval: "10s",
+		},
+	}
+
+	blob := marshal(t, BuildCaddyConfig(routes))
+
+	mustContain(t, blob, `"uri":"/"`)
+	mustContain(t, blob, `"interval":"10s"`)
+}
+
+func TestBuildCaddyConfig_NoHCWhenIntervalOmitted(t *testing.T) {
+	routes := []Route{
+		{App: "api", Host: "api.example.com", Upstreams: []string{"api-0:3000", "api-1:3000"}},
+	}
+
+	blob := marshal(t, BuildCaddyConfig(routes))
+
+	if strings.Contains(blob, `"health_checks"`) {
+		t.Errorf("no LBInterval should produce no active HC block: %s", blob)
+	}
+}
+
 func TestUpstreamForPort(t *testing.T) {
 	up, err := UpstreamForPort("api", 3000)
 	if err != nil || up != "api:3000" {

@@ -97,7 +97,7 @@ func hostRoute(r Route) map[string]any {
 		"match": []map[string]any{
 			{"host": []string{r.Host}},
 		},
-		"handle":   []map[string]any{reverseProxyHandler(r.Upstream)},
+		"handle":   []map[string]any{reverseProxyHandler(r)},
 		"terminal": true,
 	}
 }
@@ -128,7 +128,7 @@ func locationRoute(r Route, loc Location) map[string]any {
 		})
 	}
 
-	handlers = append(handlers, reverseProxyHandler(r.Upstream))
+	handlers = append(handlers, reverseProxyHandler(r))
 
 	return map[string]any{
 		"match":    []map[string]any{match},
@@ -137,13 +137,63 @@ func locationRoute(r Route, loc Location) map[string]any {
 	}
 }
 
-func reverseProxyHandler(upstream string) map[string]any {
-	return map[string]any{
-		"handler": "reverse_proxy",
-		"upstreams": []map[string]any{
-			{"dial": upstream},
-		},
+// reverseProxyHandler builds a Caddy reverse_proxy block for r.
+//
+// Upstream selection:
+//
+//   - If Upstreams has 2+ entries, emit one dial per replica plus
+//     load_balancing.selection_policy (default "round_robin").
+//   - If Upstreams has exactly 1 entry, emit that — single-upstream
+//     routes skip the LB block to keep the config noise-free.
+//   - Otherwise fall back to r.Upstream (legacy single-upstream path,
+//     still used by older controllers that predate replica awareness).
+//
+// Active health checks are wired only when LBInterval is set. The probe
+// path falls back to "/" — Caddy's default — when HealthCheckPath is
+// empty. Passive observation is always on (Caddy default).
+func reverseProxyHandler(r Route) map[string]any {
+	upstreams := r.Upstreams
+	if len(upstreams) == 0 && r.Upstream != "" {
+		upstreams = []string{r.Upstream}
 	}
+
+	dials := make([]map[string]any, 0, len(upstreams))
+	for _, u := range upstreams {
+		dials = append(dials, map[string]any{"dial": u})
+	}
+
+	h := map[string]any{
+		"handler":   "reverse_proxy",
+		"upstreams": dials,
+	}
+
+	if len(upstreams) > 1 {
+		policy := r.LBPolicy
+		if policy == "" {
+			policy = "round_robin"
+		}
+
+		h["load_balancing"] = map[string]any{
+			"selection_policy": map[string]any{"policy": policy},
+		}
+	}
+
+	if r.LBInterval != "" {
+		path := r.HealthCheckPath
+		if path == "" {
+			path = "/"
+		}
+
+		h["health_checks"] = map[string]any{
+			"active": map[string]any{
+				"uri":      path,
+				"interval": r.LBInterval,
+				"timeout":  r.LBInterval,
+			},
+		}
+	}
+
+	return h
 }
 
 // pathPatterns expands "/api/v1" into ["/api/v1", "/api/v1/*"] so both
