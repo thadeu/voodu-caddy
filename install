@@ -3,21 +3,22 @@
 #
 # Responsibilities:
 #   1. Download the voodu-caddy plugin binary into $VOODU_PLUGIN_DIR/bin/voodu-caddy
-#   2. Download the Caddy binary into /opt/voodu/caddy/bin/caddy
-#   3. Write the systemd unit that launches Caddy with Admin API on :2019
-#   4. Enable and start the unit
-#   5. Seed an empty routes/ directory so reload works on fresh install
+#   2. Ensure the `voodu0` docker network exists (shared with apps)
+#   3. Run official Caddy image as container `voodu-caddy` on voodu0,
+#      publishing :80/:443 (ingress) and 127.0.0.1:2019 (Admin API)
+#   4. Seed an empty bootstrap config so Caddy starts on a fresh machine
 #
-# Idempotent: safe to run repeatedly. Skips steps whose outputs already
-# exist with the right version.
+# Idempotent: safe to run repeatedly. Re-runs stop+replace the container
+# so fixes to flags or image pins propagate.
 
 set -euo pipefail
 
-CADDY_VERSION="${CADDY_VERSION:-2.8.4}"
+CADDY_IMAGE="${CADDY_IMAGE:-caddy:2.8}"
+CADDY_NETWORK="${CADDY_NETWORK:-voodu0}"
 STATE_DIR="${VOODU_CADDY_STATE_DIR:-/opt/voodu/caddy}"
-BIN_DIR="$STATE_DIR/bin"
-CADDY_BIN="$BIN_DIR/caddy"
-UNIT_PATH="/etc/systemd/system/voodu-caddy.service"
+DATA_DIR="$STATE_DIR/data"
+CONFIG_DIR="$STATE_DIR/config"
+CONTAINER_NAME="${VOODU_CADDY_CONTAINER:-voodu-caddy}"
 
 PLUGIN_DIR="${VOODU_PLUGIN_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 PLUGIN_BIN="$PLUGIN_DIR/bin/voodu-caddy"
@@ -72,88 +73,97 @@ install_voodu_caddy() {
   log "installed $PLUGIN_BIN"
 }
 
-install_caddy() {
-  if [ -x "$CADDY_BIN" ] && "$CADDY_BIN" version 2>/dev/null | grep -q "v$CADDY_VERSION"; then
-    log "caddy v$CADDY_VERSION already installed"
+# Apps share voodu0 with Caddy so Caddy can resolve upstream container
+# names. clowk-voodu's install creates this network as part of the
+# server bootstrap; we defensively (re)create it here for standalone
+# plugin installs onto servers provisioned by older clowk-voodu versions.
+ensure_network() {
+  if docker network inspect "$CADDY_NETWORK" >/dev/null 2>&1; then
+    log "docker network $CADDY_NETWORK already exists"
     return
   fi
 
-  local a
-  a="$(arch)"
-
-  local url="https://github.com/caddyserver/caddy/releases/download/v${CADDY_VERSION}/caddy_${CADDY_VERSION}_linux_${a}.tar.gz"
-
-  log "downloading caddy v$CADDY_VERSION ($a)"
-
-  mkdir -p "$BIN_DIR"
-
-  local tmp
-  tmp="$(mktemp -d)"
-
-  trap 'rm -rf "$tmp"' EXIT
-
-  curl -fsSL "$url" -o "$tmp/caddy.tar.gz"
-
-  tar -xzf "$tmp/caddy.tar.gz" -C "$tmp" caddy
-
-  install -m 0755 "$tmp/caddy" "$CADDY_BIN"
-
-  log "installed $CADDY_BIN"
-}
-
-write_unit() {
-  # Rewrite on every install: this is how fixes to the generated unit
-  # (bad flags, new env vars) reach existing servers. Operators with
-  # local tweaks should use a systemd drop-in at
-  # /etc/systemd/system/voodu-caddy.service.d/override.conf instead —
-  # drop-ins survive a rewrite, edits to this file do not.
-  log "writing $UNIT_PATH"
-
-  cat >"$UNIT_PATH" <<UNIT
-[Unit]
-Description=Voodu Caddy (ingress)
-Documentation=https://github.com/thadeu/voodu-caddy
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=notify
-Environment=XDG_DATA_HOME=$STATE_DIR/data
-Environment=XDG_CONFIG_HOME=$STATE_DIR/config
-ExecStart=$CADDY_BIN run --config $STATE_DIR/empty.json --resume
-ExecReload=$CADDY_BIN reload --config $STATE_DIR/empty.json --force
-Restart=on-failure
-RestartSec=5s
-LimitNOFILE=1048576
-AmbientCapabilities=CAP_NET_BIND_SERVICE
-CapabilityBoundingSet=CAP_NET_BIND_SERVICE
-
-[Install]
-WantedBy=multi-user.target
-UNIT
-
-  systemctl daemon-reload
+  log "creating docker network $CADDY_NETWORK"
+  docker network create --driver bridge "$CADDY_NETWORK" >/dev/null
 }
 
 seed_state() {
-  mkdir -p "$STATE_DIR/routes"
+  mkdir -p "$DATA_DIR" "$CONFIG_DIR" "$STATE_DIR/routes"
 
-  # A minimal bootstrap config. --resume then replays whatever the
-  # plugin has POSTed to /load, so this only runs on a fresh machine.
-  if [ ! -f "$STATE_DIR/empty.json" ]; then
-    cat >"$STATE_DIR/empty.json" <<'JSON'
+  # Bootstrap config consumed on first container start. `--resume` then
+  # replays whatever the plugin has POSTed to /load, so this file is
+  # only loaded on a fresh machine.
+  #
+  # Admin API listens on 0.0.0.0:2019 inside the container so docker's
+  # port-mapping (-p 127.0.0.1:2019:2019) can reach it. The host-side
+  # bind is localhost-only — operators get the same security posture as
+  # the old systemd setup where Admin API was bound to 127.0.0.1.
+  local empty_json="$CONFIG_DIR/empty.json"
+
+  if [ ! -f "$empty_json" ]; then
+    cat >"$empty_json" <<'JSON'
 {
-  "admin": { "listen": "127.0.0.1:2019" },
+  "admin": { "listen": "0.0.0.0:2019" },
   "apps": { "http": { "servers": {} } }
 }
 JSON
   fi
 }
 
-enable_unit() {
-  systemctl enable voodu-caddy.service
-  systemctl restart voodu-caddy.service
-  log "voodu-caddy running (admin at 127.0.0.1:2019)"
+pull_image() {
+  # Pull once per install so the `docker run` step below doesn't block
+  # on an implicit pull (which would dump progress into stderr and
+  # interleave with our log lines). Explicit pull is also what surfaces
+  # a registry error cleanly instead of masking it as a run failure.
+  log "pulling $CADDY_IMAGE"
+  docker pull --quiet "$CADDY_IMAGE" >/dev/null
+}
+
+run_container() {
+  # Stop+remove any pre-existing container so flag changes (new ports,
+  # new mounts, new image pin) propagate. The state dirs are on the
+  # host via bind mounts, so routes/certs survive the replace.
+  if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+    log "removing existing $CONTAINER_NAME container"
+    docker rm -f "$CONTAINER_NAME" >/dev/null
+  fi
+
+  log "starting $CONTAINER_NAME on $CADDY_NETWORK"
+
+  # --restart=unless-stopped replaces the systemd unit: docker daemon
+  # restores the container at boot, survives crashes, honors `docker stop`.
+  #
+  # Port mappings:
+  #   :80, :443   → public ingress (bind-all so requests from any iface reach Caddy)
+  #   127.0.0.1:2019 → Admin API (localhost-only — same as old systemd posture)
+  docker run -d \
+    --name "$CONTAINER_NAME" \
+    --network "$CADDY_NETWORK" \
+    --restart unless-stopped \
+    -p 80:80 \
+    -p 443:443 \
+    -p 443:443/udp \
+    -p 127.0.0.1:2019:2019 \
+    -v "$DATA_DIR:/data" \
+    -v "$CONFIG_DIR:/config" \
+    "$CADDY_IMAGE" \
+    caddy run --config /config/empty.json --resume >/dev/null
+
+  # Give Caddy a beat to bind Admin API before declaring success so that
+  # a plugin call right after install doesn't race the container.
+  local i=0
+  while [ $i -lt 15 ]; do
+    if curl -fsS --max-time 1 http://127.0.0.1:2019/config/ >/dev/null 2>&1; then
+      log "$CONTAINER_NAME ready (admin at 127.0.0.1:2019)"
+      return
+    fi
+
+    i=$((i + 1))
+    sleep 1
+  done
+
+  log "warning: $CONTAINER_NAME did not respond on 127.0.0.1:2019 within 15s"
+  log "inspect with: docker logs $CONTAINER_NAME"
 }
 
 main() {
@@ -162,11 +172,16 @@ main() {
     exit 1
   fi
 
+  if ! command -v docker >/dev/null 2>&1; then
+    log "docker is required but not found on PATH" >&2
+    exit 1
+  fi
+
   install_voodu_caddy
-  install_caddy
+  ensure_network
   seed_state
-  write_unit
-  enable_unit
+  pull_image
+  run_container
 }
 
 main "$@"

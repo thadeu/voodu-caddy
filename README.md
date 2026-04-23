@@ -13,9 +13,20 @@ route per manifest — into a Caddy config loaded atomically via `POST
 voodu plugins:install github.com/thadeu/voodu-caddy
 ```
 
-The `install` script downloads Caddy, writes a systemd unit, and
-starts `voodu-caddy.service` listening on `127.0.0.1:2019` (Admin API)
-plus `:80` / `:443` (ingress).
+The `install` script pulls the official `caddy:2.8` image and runs it
+as a `voodu-caddy` container on the `voodu0` docker network (shared
+with Voodu-managed apps). Ports `:80` / `:443` are published for
+ingress; the Admin API is published to `127.0.0.1:2019` on the host
+only, matching the security posture of the old systemd-based setup.
+
+The container uses `--restart=unless-stopped`, so the docker daemon
+restores it across reboots without needing a systemd unit.
+
+Running Caddy on `voodu0` (instead of on the host directly) is what
+lets it resolve upstream container names via docker's embedded DNS.
+Apps deployed through the controller join `voodu0` automatically
+(`DeploymentHandler` defaults `Network = "voodu0"` when the manifest
+doesn't specify one).
 
 ## Usage
 
@@ -228,15 +239,14 @@ Every command emits a JSON envelope on stdout:
 /opt/voodu/caddy/
 ├── bin/          # plugin binary + command wrappers
 ├── routes/       # one <app>.json per ingress
-├── data/         # caddy XDG_DATA_HOME (ACME certs, etc.)
-├── config/       # caddy XDG_CONFIG_HOME
-└── empty.json    # bootstrap config loaded by systemd unit
+├── data/         # bind-mounted to /data in container (ACME certs, autosave)
+└── config/       # bind-mounted to /config (empty.json bootstrap)
 ```
 
 `reload` rebuilds the full Caddy config from `routes/` and replaces
-the running config atomically. On restart, `caddy run --resume`
-re-plays the last accepted config from Caddy's own autosave — so the
-service comes back without the plugin doing anything.
+the running config atomically. On container restart, `caddy run
+--resume` re-plays the last accepted config from the bind-mounted
+data dir — so ingress comes back up without the plugin doing anything.
 
 ## Development
 

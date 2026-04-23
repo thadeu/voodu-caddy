@@ -1,13 +1,15 @@
 #!/usr/bin/env bash
 # uninstall — lifecycle hook run by `voodu plugins:remove caddy`.
 #
-# Stops the systemd unit, removes it, and leaves the state directory in
-# place (routes/, empty.json) so an install directly after uninstall
-# keeps running ingresses intact.
+# Stops and removes the voodu-caddy docker container. The state dir
+# (data/ with certs, config/ with the bootstrap, routes/) stays on
+# disk so a subsequent install picks up existing certificates and
+# ingresses without re-provisioning from Let's Encrypt.
 
 set -euo pipefail
 
-UNIT_PATH="/etc/systemd/system/voodu-caddy.service"
+CONTAINER_NAME="${VOODU_CADDY_CONTAINER:-voodu-caddy}"
+LEGACY_UNIT="/etc/systemd/system/voodu-caddy.service"
 
 log() { printf '[voodu-caddy/uninstall] %s\n' "$*"; }
 
@@ -16,20 +18,35 @@ if [ "$(id -u)" -ne 0 ]; then
   exit 1
 fi
 
-if systemctl is-active --quiet voodu-caddy.service; then
-  log "stopping voodu-caddy.service"
-  systemctl stop voodu-caddy.service
+# Pre-container-era hosts: tear down the systemd unit if the user is
+# upgrading from an install that predates the container switch.
+if [ -f "$LEGACY_UNIT" ]; then
+  log "detected legacy systemd unit, tearing it down"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet voodu-caddy.service; then
+      systemctl stop voodu-caddy.service
+    fi
+
+    if systemctl is-enabled --quiet voodu-caddy.service 2>/dev/null; then
+      systemctl disable voodu-caddy.service
+    fi
+  fi
+
+  rm -f "$LEGACY_UNIT"
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload
+  fi
+
+  log "removed $LEGACY_UNIT"
 fi
 
-if systemctl is-enabled --quiet voodu-caddy.service 2>/dev/null; then
-  log "disabling voodu-caddy.service"
-  systemctl disable voodu-caddy.service
-fi
-
-if [ -f "$UNIT_PATH" ]; then
-  rm -f "$UNIT_PATH"
-  systemctl daemon-reload
-  log "removed $UNIT_PATH"
+if command -v docker >/dev/null 2>&1; then
+  if docker ps -a --format '{{.Names}}' | grep -qx "$CONTAINER_NAME"; then
+    log "removing container $CONTAINER_NAME"
+    docker rm -f "$CONTAINER_NAME" >/dev/null
+  fi
 fi
 
 log "state at \$VOODU_CADDY_STATE_DIR kept (remove manually if desired)"
