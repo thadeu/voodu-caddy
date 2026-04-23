@@ -1,0 +1,17 @@
+name: caddy
+version: 0.1.0
+description: Voodu ingress plugin backed by Caddy Admin API
+homepage: https://github.com/thadeu/voodu-caddy
+
+commands:
+  - name: apply
+    help: Apply (upsert) an ingress route from $VOODU_INGRESS_* env vars.
+  - name: remove
+    help: Remove an ingress route named $VOODU_APP.
+  - name: list
+    help: List ingress routes currently configured in Caddy.
+  - name: reload
+    help: Re-sync Caddy config from /opt/voodu/caddy/state.json.
+
+env:
+  VOODU_CADDY_ADMIN_URL: "http://127.0.0.1:2019"

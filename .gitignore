@@ -1,0 +1,4 @@
+bin/voodu-caddy
+dist/
+*.test
+coverage.out

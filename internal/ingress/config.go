@@ -1,0 +1,215 @@
+package ingress
+
+import "fmt"
+
+// BuildCaddyConfig turns a list of Routes into the blob accepted by
+// Caddy's POST /load. Shape:
+//
+//	{
+//	  "apps": {
+//	    "http": {
+//	      "servers": {
+//	        "voodu": {
+//	          "listen": [":80", ":443"],
+//	          "routes": [ ... one per ingress ... ]
+//	        }
+//	      }
+//	    },
+//	    "tls": {
+//	      "automation": {
+//	        "policies":  [ ... per-(issuer,email,on_demand) ... ],
+//	        "on_demand": { "ask": "<callback URL>" }
+//	      }
+//	    }
+//	  }
+//	}
+//
+// The single "voodu" server owns both ports. Caddy auto-selects HTTPS
+// when a route has TLS configured; auto-https also injects the HTTP→HTTPS
+// redirect. On-demand TLS is wired via a global `on_demand.ask` gate
+// plus per-policy `on_demand: true` subjects — this is what lets a
+// single wildcard route (`*.tenant.example.com`) serve arbitrary
+// subdomains with per-tenant cert issuance gated by the app.
+func BuildCaddyConfig(routes []Route) map[string]any {
+	httpRoutes := make([]map[string]any, 0, len(routes))
+
+	for _, r := range routes {
+		httpRoutes = append(httpRoutes, caddyRoute(r))
+	}
+
+	cfg := map[string]any{
+		"apps": map[string]any{
+			"http": map[string]any{
+				"servers": map[string]any{
+					"voodu": map[string]any{
+						"listen": []string{":80", ":443"},
+						"routes": httpRoutes,
+					},
+				},
+			},
+		},
+	}
+
+	if tls := tlsAppConfig(routes); tls != nil {
+		cfg["apps"].(map[string]any)["tls"] = tls
+	}
+
+	return cfg
+}
+
+// caddyRoute is the JSON shape Caddy expects for one reverse-proxy route.
+// Pinned to the fields we actually use so accidental drift is loud.
+// Host header is preserved by Caddy v2's reverse_proxy default, so we
+// don't set it explicitly — the on-demand ask gate reads the SNI, not
+// the upstream Host, so this is safe for multi-tenant routes too.
+func caddyRoute(r Route) map[string]any {
+	return map[string]any{
+		"match": []map[string]any{
+			{"host": []string{r.Host}},
+		},
+		"handle": []map[string]any{
+			{
+				"handler": "reverse_proxy",
+				"upstreams": []map[string]any{
+					{"dial": r.Upstream},
+				},
+			},
+		},
+		"terminal": true,
+	}
+}
+
+// tlsAppConfig assembles the whole `apps.tls` block. Returns nil when
+// no route needs TLS at all (pure HTTP fleet).
+func tlsAppConfig(routes []Route) map[string]any {
+	policies := tlsPolicies(routes)
+	ask := onDemandAsk(routes)
+
+	if len(policies) == 0 && ask == "" {
+		return nil
+	}
+
+	automation := map[string]any{}
+
+	if len(policies) > 0 {
+		automation["policies"] = policies
+	}
+
+	if ask != "" {
+		// Caddy's `on_demand.ask` is global — a single URL gates every
+		// on-demand issuance. We take the first non-empty Ask; the plugin
+		// boundary enforces that all on-demand routes agree.
+		automation["on_demand"] = map[string]any{
+			"ask": ask,
+		}
+	}
+
+	return map[string]any{"automation": automation}
+}
+
+// onDemandAsk returns the first non-empty TLSAsk on any on-demand route.
+// Caddy supports only one global ask endpoint; callers are expected to
+// point every on-demand route at the same URL.
+func onDemandAsk(routes []Route) string {
+	for _, r := range routes {
+		if r.OnDemand && r.TLSAsk != "" {
+			return r.TLSAsk
+		}
+	}
+
+	return ""
+}
+
+// tlsPolicies groups routes into automation policies, one per
+// (provider, email, on_demand) triple. Routes without a provider and
+// without on-demand contribute nothing (HTTP-only or Caddy-internal).
+//
+// Iteration order is stable: policies appear in the order of the first
+// route that contributed to each group, so generated config blobs are
+// deterministic for a given Routes slice (which List() already sorts).
+func tlsPolicies(routes []Route) []map[string]any {
+	type key struct {
+		provider string
+		email    string
+		onDemand bool
+	}
+
+	grouped := map[key][]string{}
+
+	var order []key
+
+	for _, r := range routes {
+		acme := r.TLSProvider != "" && r.TLSProvider != "internal"
+
+		if !acme && !r.OnDemand {
+			continue
+		}
+
+		k := key{provider: r.TLSProvider, email: r.TLSEmail, onDemand: r.OnDemand}
+
+		if _, seen := grouped[k]; !seen {
+			order = append(order, k)
+		}
+
+		grouped[k] = append(grouped[k], r.Host)
+	}
+
+	out := make([]map[string]any, 0, len(order))
+
+	for _, k := range order {
+		policy := map[string]any{
+			"subjects": grouped[k],
+		}
+
+		if k.onDemand {
+			policy["on_demand"] = true
+		}
+
+		if k.provider != "" && k.provider != "internal" {
+			policy["issuers"] = []map[string]any{acmeIssuer(k.provider, k.email)}
+		}
+
+		out = append(out, policy)
+	}
+
+	return out
+}
+
+// acmeIssuer returns the Caddy issuer blob for a provider name. Today
+// only "letsencrypt" has real handling; unknown providers fall back to
+// a plain ACME entry so operators can add new providers in HCL without
+// the plugin blocking them.
+func acmeIssuer(provider, email string) map[string]any {
+	issuer := map[string]any{
+		"module": "acme",
+	}
+
+	if email != "" {
+		issuer["email"] = email
+	}
+
+	// letsencrypt is Caddy's default directory, so leaving "ca" empty is
+	// equivalent — but being explicit helps when operators read dumps.
+	if provider == "letsencrypt" {
+		issuer["ca"] = "https://acme-v02.api.letsencrypt.org/directory"
+	}
+
+	return issuer
+}
+
+// UpstreamForPort composes a host:port upstream from a service name and
+// a port. Today we resolve service name literally — it's expected to be
+// reachable as a DNS name inside the Docker network (that's how Gokku's
+// networking works). If the port is zero, default to 80 (HTTP plaintext
+// between ingress and upstream is fine since both are on the same host).
+func UpstreamForPort(service string, port int) (string, error) {
+	if service == "" {
+		return "", fmt.Errorf("service is required")
+	}
+
+	if port <= 0 {
+		port = 80
+	}
+
+	return fmt.Sprintf("%s:%d", service, port), nil
+}

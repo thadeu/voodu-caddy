@@ -1,0 +1,35 @@
+#!/usr/bin/env bash
+# uninstall — lifecycle hook run by `voodu plugins:remove caddy`.
+#
+# Stops the systemd unit, removes it, and leaves the state directory in
+# place (routes/, empty.json) so an install directly after uninstall
+# keeps running ingresses intact.
+
+set -euo pipefail
+
+UNIT_PATH="/etc/systemd/system/voodu-caddy.service"
+
+log() { printf '[voodu-caddy/uninstall] %s\n' "$*"; }
+
+if [ "$(id -u)" -ne 0 ]; then
+  log "must run as root"
+  exit 1
+fi
+
+if systemctl is-active --quiet voodu-caddy.service; then
+  log "stopping voodu-caddy.service"
+  systemctl stop voodu-caddy.service
+fi
+
+if systemctl is-enabled --quiet voodu-caddy.service 2>/dev/null; then
+  log "disabling voodu-caddy.service"
+  systemctl disable voodu-caddy.service
+fi
+
+if [ -f "$UNIT_PATH" ]; then
+  rm -f "$UNIT_PATH"
+  systemctl daemon-reload
+  log "removed $UNIT_PATH"
+fi
+
+log "state at \$VOODU_CADDY_STATE_DIR kept (remove manually if desired)"
