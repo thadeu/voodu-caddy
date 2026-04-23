@@ -24,6 +24,11 @@ import (
 	"github.com/thadeu/voodu-caddy/internal/ingress"
 )
 
+// version is overridden at link time via -ldflags '-X main.version=…'
+// so the install script can verify a downloaded binary matches the
+// release tag (see Makefile and .github/workflows/release.yml).
+var version = "dev"
+
 // envelope mirrors pkg/plugin.Envelope from the core repo. Duplicated
 // here so the plugin has no Go dependency on the core module (plugins
 // are built and released independently).
@@ -52,11 +57,16 @@ const (
 
 func main() {
 	if len(os.Args) < 2 {
-		emit(envelope{Status: "error", Error: "usage: voodu-caddy <apply|remove|list|reload>"})
+		emit(envelope{Status: "error", Error: "usage: voodu-caddy <apply|remove|list|reload|version>"})
 		os.Exit(2)
 	}
 
 	sub := os.Args[1]
+
+	if sub == "version" || sub == "--version" || sub == "-v" {
+		fmt.Println(version)
+		return
+	}
 
 	env := readEnv()
 	store := ingress.NewStore(env.stateDir)

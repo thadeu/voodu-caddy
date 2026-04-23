@@ -250,6 +250,41 @@ The end-to-end test (`cmd/voodu-caddy/main_test.go`) builds the
 binary, spins up a mock Admin API with `httptest`, and walks the
 full `apply → list → remove` cycle.
 
+## Releasing a new version
+
+`voodu plugins:install thadeu/voodu-caddy` clones this repo and runs
+the `install` script — which downloads the plugin binary from GitHub
+Releases matching the `version:` field in `plugin.yml`. So publishing
+a new version is three steps:
+
+1. **Bump `plugin.yml`:**
+
+   ```yaml
+   # plugin.yml
+   name: caddy
+   version: 0.2.0   # ← bump here
+   ```
+
+2. **Commit and tag** — the tag must be `v` + the exact `plugin.yml`
+   version, or the release workflow refuses to publish:
+
+   ```sh
+   git commit -am "release v0.2.0"
+   git tag v0.2.0
+   git push && git push --tags
+   ```
+
+3. **Wait for GitHub Actions** — `.github/workflows/release.yml` runs
+   `make cross` and uploads `voodu-caddy_linux_amd64` and
+   `voodu-caddy_linux_arm64` to the release. Once green, existing and
+   new installs that run `voodu plugins:install` will pull the new
+   binary (the `install` hook is idempotent — it re-downloads only
+   when the on-disk binary's `--version` does not match `plugin.yml`).
+
+To test a fork's release without touching the canonical repo, export
+`VOODU_CADDY_RELEASE_REPO=your/fork` before calling
+`voodu plugins:install`.
+
 ## License
 
 MIT.

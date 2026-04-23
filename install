@@ -2,10 +2,11 @@
 # install — lifecycle hook run by `voodu plugins:install caddy`.
 #
 # Responsibilities:
-#   1. Download the Caddy binary into /opt/voodu/caddy/bin/caddy
-#   2. Write the systemd unit that launches Caddy with Admin API on :2019
-#   3. Enable and start the unit
-#   4. Seed an empty routes/ directory so reload works on fresh install
+#   1. Download the voodu-caddy plugin binary into $VOODU_PLUGIN_DIR/bin/voodu-caddy
+#   2. Download the Caddy binary into /opt/voodu/caddy/bin/caddy
+#   3. Write the systemd unit that launches Caddy with Admin API on :2019
+#   4. Enable and start the unit
+#   5. Seed an empty routes/ directory so reload works on fresh install
 #
 # Idempotent: safe to run repeatedly. Skips steps whose outputs already
 # exist with the right version.
@@ -18,6 +19,10 @@ BIN_DIR="$STATE_DIR/bin"
 CADDY_BIN="$BIN_DIR/caddy"
 UNIT_PATH="/etc/systemd/system/voodu-caddy.service"
 
+PLUGIN_DIR="${VOODU_PLUGIN_DIR:-$(cd "$(dirname "$0")" && pwd)}"
+PLUGIN_BIN="$PLUGIN_DIR/bin/voodu-caddy"
+RELEASE_REPO="${VOODU_CADDY_RELEASE_REPO:-thadeu/voodu-caddy}"
+
 log() { printf '[voodu-caddy/install] %s\n' "$*"; }
 
 arch() {
@@ -26,6 +31,45 @@ arch() {
     aarch64|arm64) echo "arm64" ;;
     *) echo "unsupported arch: $(uname -m)" >&2; exit 1 ;;
   esac
+}
+
+install_voodu_caddy() {
+  local version
+  version="$(grep '^version:' "$PLUGIN_DIR/plugin.yml" | awk '{print $2}')"
+
+  if [ -z "$version" ]; then
+    log "could not read version from $PLUGIN_DIR/plugin.yml" >&2
+    exit 1
+  fi
+
+  if [ -x "$PLUGIN_BIN" ] && "$PLUGIN_BIN" --version 2>/dev/null | grep -q "$version"; then
+    log "voodu-caddy v$version already installed at $PLUGIN_BIN"
+    return
+  fi
+
+  local a
+  a="$(arch)"
+
+  local url="https://github.com/${RELEASE_REPO}/releases/download/v${version}/voodu-caddy_linux_${a}"
+
+  log "downloading voodu-caddy v$version ($a) from $url"
+
+  mkdir -p "$(dirname "$PLUGIN_BIN")"
+
+  local tmp
+  tmp="$(mktemp)"
+
+  if ! curl -fsSL "$url" -o "$tmp"; then
+    rm -f "$tmp"
+    log "failed to download voodu-caddy binary from $url" >&2
+    log "make sure release v$version was published with the linux_${a} asset" >&2
+    exit 1
+  fi
+
+  install -m 0755 "$tmp" "$PLUGIN_BIN"
+  rm -f "$tmp"
+
+  log "installed $PLUGIN_BIN"
 }
 
 install_caddy() {
@@ -118,6 +162,7 @@ main() {
     exit 1
   fi
 
+  install_voodu_caddy
   install_caddy
   seed_state
   write_unit
