@@ -13,6 +13,10 @@ func TestBuildCaddyConfig_Basic(t *testing.T) {
 
 	blob := marshal(t, cfg)
 
+	// Admin API must always be present — /load replaces the whole config
+	// atomically, so if we omit it Caddy resets admin to loopback-only and
+	// the plugin can't talk back.
+	mustContain(t, blob, `"admin":{"listen":"0.0.0.0:2019"}`)
 	mustContain(t, blob, `"listen":[":80",":443"]`)
 	mustContain(t, blob, `"host":["api.example.com"]`)
 	mustContain(t, blob, `"dial":"api:3000"`)

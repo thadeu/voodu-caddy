@@ -38,6 +38,15 @@ func BuildCaddyConfig(routes []Route) map[string]any {
 	}
 
 	cfg := map[string]any{
+		// Admin API must be re-declared on every /load because Caddy
+		// replaces the full config atomically. Omitting it would let the
+		// default (localhost:2019) take over — which, inside the
+		// container, is loopback-only and docker's -p 127.0.0.1:2019:2019
+		// mapping can't reach it. 0.0.0.0:2019 is safe because docker only
+		// exposes the port on the host's loopback.
+		"admin": map[string]any{
+			"listen": "0.0.0.0:2019",
+		},
 		"apps": map[string]any{
 			"http": map[string]any{
 				"servers": map[string]any{
