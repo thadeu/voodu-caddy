@@ -102,11 +102,11 @@ install_caddy() {
 }
 
 write_unit() {
-  if [ -f "$UNIT_PATH" ]; then
-    log "systemd unit already present at $UNIT_PATH"
-    return
-  fi
-
+  # Rewrite on every install: this is how fixes to the generated unit
+  # (bad flags, new env vars) reach existing servers. Operators with
+  # local tweaks should use a systemd drop-in at
+  # /etc/systemd/system/voodu-caddy.service.d/override.conf instead —
+  # drop-ins survive a rewrite, edits to this file do not.
   log "writing $UNIT_PATH"
 
   cat >"$UNIT_PATH" <<UNIT
@@ -120,8 +120,8 @@ Wants=network-online.target
 Type=notify
 Environment=XDG_DATA_HOME=$STATE_DIR/data
 Environment=XDG_CONFIG_HOME=$STATE_DIR/config
-ExecStart=$CADDY_BIN run --config $STATE_DIR/empty.json --adapter json --resume
-ExecReload=$CADDY_BIN reload --config $STATE_DIR/empty.json --adapter json --force
+ExecStart=$CADDY_BIN run --config $STATE_DIR/empty.json --resume
+ExecReload=$CADDY_BIN reload --config $STATE_DIR/empty.json --force
 Restart=on-failure
 RestartSec=5s
 LimitNOFILE=1048576
