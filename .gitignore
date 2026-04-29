@@ -2,3 +2,5 @@ bin/voodu-caddy
 dist/
 *.test
 coverage.out
+.DS_Store
+voodu-caddy
