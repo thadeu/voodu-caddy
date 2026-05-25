@@ -28,6 +28,53 @@ func TestBuildCaddyConfig_Basic(t *testing.T) {
 	}
 }
 
+// TestBuildCaddyConfig_AccessLogAlwaysOn pins the access-log contract
+// the voodu controller's ingress sampler depends on. If any of these
+// asserts break, the HTTP metrics pipeline downstream silently stops
+// producing data (the sampler would tail an empty/missing file).
+func TestBuildCaddyConfig_AccessLogAlwaysOn(t *testing.T) {
+	// Even with zero routes (clean install, no apps applied yet) we
+	// want the logging block present — first request to any future
+	// route gets captured without a config reapply.
+	blob := marshal(t, BuildCaddyConfig(nil))
+
+	// Top-level logger named "access" writes the file Caddy needs to
+	// hit. Inside the container this is /var/log/caddy/access.log;
+	// install bind-mounts the host's $STATE_DIR/logs to that path so
+	// the controller can tail it from outside the container.
+	mustContain(t, blob, `"logging":`)
+	mustContain(t, blob, `"access":`)
+	mustContain(t, blob, `"filename":"/var/log/caddy/access.log"`)
+	mustContain(t, blob, `"output":"file"`)
+	mustContain(t, blob, `"format":"json"`)
+
+	// `include` filters the access logger to request lines only.
+	// Without it, this file would also collect default/info chatter
+	// from startup + config events, breaking line-by-line JSON parsing.
+	mustContain(t, blob, `"include":["http.log.access"]`)
+
+	// Rolling config — caps disk usage so a busy site doesn't fill the
+	// volume between operator inspections.
+	mustContain(t, blob, `"roll":true`)
+	mustContain(t, blob, `"roll_size_mb":100`)
+
+	// Server's `logs` block (empty {}) is what flips access logging ON
+	// for the voodu server — without it the top-level "access" logger
+	// would exist but never receive lines.
+	mustContain(t, blob, `"voodu":{`)
+	mustContain(t, blob, `"logs":{}`)
+}
+
+// TestAccessLogPath_Stable pins the path constant so a careless rename
+// can't drift the contract between this plugin and the controller's
+// sampler. Both sides hard-code this; one moving without the other
+// silently kills HTTP metrics.
+func TestAccessLogPath_Stable(t *testing.T) {
+	if AccessLogPath != "/var/log/caddy/access.log" {
+		t.Fatalf("AccessLogPath changed to %q — controller sampler must update its tail path in lockstep", AccessLogPath)
+	}
+}
+
 func TestBuildCaddyConfig_TLSGroupsByProviderAndEmail(t *testing.T) {
 	routes := []Route{
 		{App: "api", Host: "api.x.com", Upstream: "api:3000", TLSProvider: "letsencrypt", TLSEmail: "ops@x.com"},

@@ -2,16 +2,30 @@ package ingress
 
 import "fmt"
 
+// AccessLogPath is the file (INSIDE the Caddy container) the access log
+// is written to. The install script bind-mounts /var/log/caddy from the
+// host's $VOODU_CADDY_STATE_DIR/logs, so the host sees the file at
+//
+//	$VOODU_CADDY_STATE_DIR/logs/access.log    (default /opt/voodu/caddy/logs/access.log)
+//
+// That host-side path is the contract the voodu controller's ingress
+// sampler tails. If this path or the mount changes, both sides must
+// move in lockstep.
+const AccessLogPath = "/var/log/caddy/access.log"
+
 // BuildCaddyConfig turns a list of Routes into the blob accepted by
 // Caddy's POST /load. Shape:
 //
 //	{
+//	  "admin":   { ... },
+//	  "logging": { ... access log writer ... },
 //	  "apps": {
 //	    "http": {
 //	      "servers": {
 //	        "voodu": {
 //	          "listen": [":80", ":443"],
-//	          "routes": [ ... one per ingress ... ]
+//	          "routes": [ ... one per ingress ... ],
+//	          "logs":   { ... enables access logging ... }
 //	        }
 //	      }
 //	    },
@@ -30,6 +44,14 @@ import "fmt"
 // plus per-policy `on_demand: true` subjects — this is what lets a
 // single wildcard route (`*.tenant.example.com`) serve arbitrary
 // subdomains with per-tenant cert issuance gated by the app.
+//
+// Access logging is always on, JSON encoded, written to AccessLogPath.
+// The voodu controller's ingress sampler tails that file to derive
+// per-pod HTTP metrics (p50/p95/p99 latency, request count, error rate)
+// that the WebUI surfaces as stat cards on `app`-kind pods. Disabling
+// access logs would silently break that pipeline; if an operator really
+// needs to opt out, the right move is a future plugin env flag
+// (VOODU_CADDY_DISABLE_ACCESS_LOG=true) wired through BuildCaddyConfig.
 func BuildCaddyConfig(routes []Route) map[string]any {
 	httpRoutes := make([]map[string]any, 0, len(routes))
 
@@ -47,12 +69,42 @@ func BuildCaddyConfig(routes []Route) map[string]any {
 		"admin": map[string]any{
 			"listen": "0.0.0.0:2019",
 		},
+		// Top-level access logging — JSON to file, rolled at 100MB,
+		// keep 5 generations for up to 7 days. The "include" filter
+		// catches lines tagged http.log.access.<server> (Caddy emits
+		// each server's access logs under that namespace), keeping the
+		// file restricted to request lines — startup/config events
+		// stay on the default stderr stream so this file is parseable
+		// as one-JSON-per-line without filtering downstream.
+		"logging": map[string]any{
+			"logs": map[string]any{
+				"access": map[string]any{
+					"writer": map[string]any{
+						"output":         "file",
+						"filename":       AccessLogPath,
+						"roll":           true,
+						"roll_size_mb":   100,
+						"roll_keep":      5,
+						"roll_keep_days": 7,
+					},
+					"encoder": map[string]any{
+						"format": "json",
+					},
+					"include": []string{"http.log.access"},
+				},
+			},
+		},
 		"apps": map[string]any{
 			"http": map[string]any{
 				"servers": map[string]any{
 					"voodu": map[string]any{
 						"listen": []string{":80", ":443"},
 						"routes": httpRoutes,
+						// Empty `logs` block = enable access logging with
+						// Caddy defaults; lines flow to the "access" logger
+						// declared above (matched via the include filter
+						// on http.log.access.voodu).
+						"logs": map[string]any{},
 					},
 				},
 			},

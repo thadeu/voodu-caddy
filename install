@@ -18,6 +18,11 @@ CADDY_NETWORK="${CADDY_NETWORK:-voodu0}"
 STATE_DIR="${VOODU_CADDY_STATE_DIR:-/opt/voodu/caddy}"
 DATA_DIR="$STATE_DIR/data"
 CONFIG_DIR="$STATE_DIR/config"
+# Bind-mounted to /var/log/caddy inside the container so Caddy's
+# access log lands on the host filesystem where the voodu controller's
+# ingress sampler can tail it. See AccessLogPath in internal/ingress/config.go
+# for the in-container side of this contract.
+LOGS_DIR="$STATE_DIR/logs"
 CONTAINER_NAME="${VOODU_CADDY_CONTAINER:-voodu-caddy}"
 
 PLUGIN_DIR="${VOODU_PLUGIN_DIR:-$(cd "$(dirname "$0")" && pwd)}"
@@ -88,7 +93,7 @@ ensure_network() {
 }
 
 seed_state() {
-  mkdir -p "$DATA_DIR" "$CONFIG_DIR" "$STATE_DIR/routes"
+  mkdir -p "$DATA_DIR" "$CONFIG_DIR" "$STATE_DIR/routes" "$LOGS_DIR"
 
   # Bootstrap config consumed on first container start. `--resume` then
   # replays whatever the plugin has POSTed to /load, so this file is
@@ -146,6 +151,7 @@ run_container() {
     -p 127.0.0.1:2019:2019 \
     -v "$DATA_DIR:/data" \
     -v "$CONFIG_DIR:/config" \
+    -v "$LOGS_DIR:/var/log/caddy" \
     "$CADDY_IMAGE" \
     caddy run --config /config/empty.json --resume >/dev/null
 
