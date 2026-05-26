@@ -63,6 +63,29 @@ func TestBuildCaddyConfig_AccessLogAlwaysOn(t *testing.T) {
 	// would exist but never receive lines.
 	mustContain(t, blob, `"voodu":{`)
 	mustContain(t, blob, `"logs":{}`)
+
+	// Filter-format encoder strips heavyweight fields the controller
+	// sampler never reads (headers, cookies, TLS, IPs, resp_headers).
+	// Saves ~75% on log line size + corresponding parse cost
+	// downstream. Each REMOVED field is asserted individually so a
+	// future "let's keep headers for debugging" change has to also
+	// touch this test — making the trade-off explicit.
+	mustContain(t, blob, `"format":"filter"`)
+	// Note: Go's json.Marshal HTML-escapes '>' inside string keys
+	// as `>` (interpreted by Caddy as '>' before the encoder
+	// reads the field path). Asserting the on-the-wire form here
+	// so the test reflects what actually ships to /load.
+	mustContain(t, blob, "\"request\\u003eheaders\":{\"filter\":\"delete\"}")
+	mustContain(t, blob, "\"request\\u003ecookies\":{\"filter\":\"delete\"}")
+	mustContain(t, blob, "\"request\\u003etls\":{\"filter\":\"delete\"}")
+	mustContain(t, blob, "\"request\\u003eremote_ip\":{\"filter\":\"delete\"}")
+	mustContain(t, blob, `"resp_headers":{"filter":"delete"}`)
+
+	// What MUST survive the filter (sampler reads these — removing any
+	// silently breaks the HTTP metrics pipeline):
+	if !strings.Contains(blob, `"wrap":{"format":"json"}`) {
+		t.Fatalf("filter encoder must wrap json (controller sampler is line-by-line JSON parser): %s", blob)
+	}
 }
 
 // TestAccessLogPath_Stable pins the path constant so a careless rename

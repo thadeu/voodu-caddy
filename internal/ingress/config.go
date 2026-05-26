@@ -87,8 +87,43 @@ func BuildCaddyConfig(routes []Route) map[string]any {
 						"roll_keep":      5,
 						"roll_keep_days": 7,
 					},
+					// Encoder = filter-wrapping-json. We strip every field
+					// the voodu ingress sampler doesn't read, keeping the
+					// log ~75% smaller on disk + faster to parse:
+					//
+					//   - request.host + request.uri + request.method survive
+					//     (host maps the line to a deployment, uri drives
+					//     the asset-vs-page classifier on the controller,
+					//     method is kept for debugging + future filter rules)
+					//   - duration, size, status survive (the actual metrics)
+					//   - ts + msg survive (debugging without extra cost)
+					//
+					// Removed because nothing in the pipeline reads them:
+					// headers, cookies, TLS info, remote/client IPs,
+					// resp_headers, bytes_read, user_id, logger, level.
+					// Headers + cookies alone often dominate line size,
+					// especially with long User-Agent / Cookie pairs.
+					//
+					// IMPORTANT: if you re-introduce a metric that needs
+					// one of the removed fields (e.g. per-IP rate-limit
+					// signal needs remote_ip), DELETE its entry from the
+					// `fields` map below. The format choice is fully
+					// reversible via Caddy's POST /load.
 					"encoder": map[string]any{
-						"format": "json",
+						"format": "filter",
+						"wrap":   map[string]any{"format": "json"},
+						"fields": map[string]any{
+							"request>headers":     map[string]any{"filter": "delete"},
+							"request>cookies":     map[string]any{"filter": "delete"},
+							"request>tls":         map[string]any{"filter": "delete"},
+							"request>remote_ip":   map[string]any{"filter": "delete"},
+							"request>remote_port": map[string]any{"filter": "delete"},
+							"request>client_ip":   map[string]any{"filter": "delete"},
+							"request>proto":       map[string]any{"filter": "delete"},
+							"resp_headers":        map[string]any{"filter": "delete"},
+							"bytes_read":          map[string]any{"filter": "delete"},
+							"user_id":             map[string]any{"filter": "delete"},
+						},
 					},
 					"include": []string{"http.log.access"},
 				},
