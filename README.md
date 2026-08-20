@@ -28,6 +28,61 @@ Apps deployed through the controller join `voodu0` automatically
 (`DeploymentHandler` defaults `Network = "voodu0"` when the manifest
 doesn't specify one).
 
+### Resource limits
+
+The container runs with a cgroup memory cap. Without one it inherits
+the host's entire RAM as its ceiling — `docker stats` then reads
+`14.03MiB / 3.758GiB`, where the denominator is the machine, not a
+budget. A leak or a burst of connections would compete with the apps
+Caddy is supposed to be fronting, and the kernel would pick the OOM
+victim by heuristic rather than by policy.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `VOODU_CADDY_MEMORY` | `256m` | Hard cap. Exceeding it kills the container; `--restart unless-stopped` brings it back. |
+| `VOODU_CADDY_MEMORY_SWAP` | same as `VOODU_CADDY_MEMORY` | Memory **plus** swap. Equal values mean no swap at all. |
+| `VOODU_CADDY_MEMORY_RESERVATION` | `64m` | Soft floor. Under host pressure the kernel reclaims toward this before touching processes that declared nothing. |
+| `VOODU_CADDY_CPUS` | unset | CPU cap (`--cpus`). Uncapped by default. |
+
+`256m` is roughly 18x an idle Caddy's ~14 MiB, which leaves room for
+the TLS session cache, per-connection buffers and quic-go's receive
+windows under real traffic. Raise it on a busy edge:
+
+```sh
+VOODU_CADDY_MEMORY=512m voodu plugins:install github.com/thadeu/voodu-caddy
+```
+
+Swap is pinned off on purpose: a swapping reverse proxy adds latency
+to every request routed through it, so a fast OOM and restart beats a
+slow-motion outage. Hosts without kernel swap accounting log a docker
+warning and apply the memory cap alone — that is correct degraded
+behaviour, not a failure.
+
+CPU is uncapped by default because the failure modes are not
+symmetric. Memory exhaustion takes the host down; CPU contention only
+makes it slow, and throttling the ingress proxy during a traffic spike
+degrades every app behind it at the worst possible moment. Opt in with
+`VOODU_CADDY_CPUS=1.5` when Caddy shares a box with a latency-sensitive
+workload.
+
+To change the cap on a **running** container without an ingress
+outage, skip the re-install and update the cgroup in place:
+
+```sh
+docker update --memory 512m --memory-swap 512m voodu-caddy
+```
+
+That survives restarts (docker persists `HostConfig`), but a later
+`voodu plugins:install` re-creates the container from the script's
+defaults — so export the env var too if the change should be
+permanent.
+
+Check headroom at any time:
+
+```sh
+docker stats --no-stream voodu-caddy
+```
+
 ## Usage
 
 The plugin is invoked by the Voodu controller, not directly by users.

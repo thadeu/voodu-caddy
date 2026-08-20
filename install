@@ -25,6 +25,41 @@ CONFIG_DIR="$STATE_DIR/config"
 LOGS_DIR="$STATE_DIR/logs"
 CONTAINER_NAME="${VOODU_CADDY_CONTAINER:-voodu-caddy}"
 
+# Cgroup caps. Without them the container inherits the host's entire
+# RAM as its ceiling — `docker stats` reports "14MiB / 3.758GiB", where
+# the denominator is the machine, not a budget. A leak, a burst of
+# HTTP/3 connections, or a pathological upload then competes with the
+# apps Caddy is supposed to be fronting, and the kernel picks the OOM
+# victim by heuristic instead of by policy.
+#
+# 256m against a ~14m idle footprint is ~18x headroom: enough for TLS
+# session cache, per-connection buffers and quic-go's receive windows
+# under real traffic, small enough that a runaway hits the wall long
+# before the host does. Raise it on a busy edge:
+#
+#   VOODU_CADDY_MEMORY=512m voodu plugins:install thadeu/voodu-caddy
+#
+# MEMORY_SWAP is pinned to MEMORY on purpose. Docker's default is 2x
+# the limit, which lets a proxy escape into swap — and a swapping
+# reverse proxy adds latency to every request routed through it. A
+# fast OOM+restart beats a slow-motion outage. Hosts without kernel
+# swap accounting log a warning here and apply the memory cap alone;
+# that is the correct degraded behaviour, not an error.
+CADDY_MEMORY="${VOODU_CADDY_MEMORY:-256m}"
+CADDY_MEMORY_SWAP="${VOODU_CADDY_MEMORY_SWAP:-$CADDY_MEMORY}"
+
+# Soft limit: under host memory pressure the kernel reclaims this
+# container back toward 64m before it touches processes that declared
+# nothing. Never kills — that is MEMORY's job.
+CADDY_MEMORY_RESERVATION="${VOODU_CADDY_MEMORY_RESERVATION:-64m}"
+
+# CPU is deliberately uncapped by default. Memory exhaustion takes the
+# host down; CPU contention only makes it slow, and throttling the
+# ingress proxy during a traffic spike degrades every app behind it at
+# the worst possible moment. Opt in when Caddy shares a box with a
+# latency-sensitive workload: VOODU_CADDY_CPUS=1.5
+CADDY_CPUS="${VOODU_CADDY_CPUS:-}"
+
 PLUGIN_DIR="${VOODU_PLUGIN_DIR:-$(cd "$(dirname "$0")" && pwd)}"
 PLUGIN_BIN="$PLUGIN_DIR/bin/voodu-caddy"
 RELEASE_REPO="${VOODU_CADDY_RELEASE_REPO:-thadeu/voodu-caddy}"
@@ -141,17 +176,32 @@ run_container() {
   # Port mappings:
   #   :80, :443   → public ingress (bind-all so requests from any iface reach Caddy)
   #   127.0.0.1:2019 → Admin API (localhost-only — same as old systemd posture)
-  docker run -d \
-    --name "$CONTAINER_NAME" \
-    --network "$CADDY_NETWORK" \
-    --restart unless-stopped \
-    -p 80:80 \
-    -p 443:443 \
-    -p 443:443/udp \
-    -p 127.0.0.1:2019:2019 \
-    -v "$DATA_DIR:/data" \
-    -v "$CONFIG_DIR:/config" \
-    -v "$LOGS_DIR:/var/log/caddy" \
+  local args=(
+    -d
+    --name "$CONTAINER_NAME"
+    --network "$CADDY_NETWORK"
+    --restart unless-stopped
+    --memory "$CADDY_MEMORY"
+    --memory-swap "$CADDY_MEMORY_SWAP"
+    --memory-reservation "$CADDY_MEMORY_RESERVATION"
+    -p 80:80
+    -p 443:443
+    -p 443:443/udp
+    -p 127.0.0.1:2019:2019
+    -v "$DATA_DIR:/data"
+    -v "$CONFIG_DIR:/config"
+    -v "$LOGS_DIR:/var/log/caddy"
+  )
+
+  # Appended only when the operator asked for it — an empty --cpus is a
+  # docker error, not a no-op.
+  if [ -n "$CADDY_CPUS" ]; then
+    args+=(--cpus "$CADDY_CPUS")
+  fi
+
+  log "memory limit $CADDY_MEMORY (swap $CADDY_MEMORY_SWAP, reservation $CADDY_MEMORY_RESERVATION)${CADDY_CPUS:+, cpus $CADDY_CPUS}"
+
+  docker run "${args[@]}" \
     "$CADDY_IMAGE" \
     caddy run --config /config/empty.json --resume >/dev/null
 
