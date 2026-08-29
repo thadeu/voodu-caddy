@@ -352,4 +352,4 @@ To test a fork's release without touching the canonical repo, export
 
 ## License
 
-MIT.
+Elastic License 2.0 — see [LICENSE](LICENSE).
