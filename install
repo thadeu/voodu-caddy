@@ -127,6 +127,47 @@ ensure_network() {
   docker network create --driver bridge "$CADDY_NETWORK" >/dev/null
 }
 
+# container_dns_args prints the --dns flags Caddy is started with on a host
+# whose voodu0 is routed over WireGuard: the voodu mesh DNS on the voodu0
+# gateway first, then the host's own resolvers. The controller gives every
+# app container the same two, so an ingress can name a service running on
+# another voodu host and Caddy resolves it the way the apps do. Docker's
+# embedded DNS asks them in order and stops at the first NXDOMAIN, which is
+# why the mesh has to come first.
+#
+# Prints nothing on a host local to itself (no --ip-range on voodu0): Caddy
+# keeps docker's defaults, exactly as before.
+container_dns_args() {
+  local ip_range gateway file ns
+
+  ip_range="$(docker network inspect "$CADDY_NETWORK" -f '{{range .IPAM.Config}}{{.IPRange}}{{end}}' 2>/dev/null || true)"
+
+  if [ -z "$ip_range" ]; then
+    return
+  fi
+
+  gateway="$(docker network inspect "$CADDY_NETWORK" -f '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null || true)"
+
+  if [ -z "$gateway" ]; then
+    return
+  fi
+
+  printf -- '--dns\n%s\n' "$gateway"
+
+  # systemd-resolved's upstream file first: with it, /etc/resolv.conf
+  # points at the 127.0.0.53 stub, which a container cannot reach.
+  for file in /run/systemd/resolve/resolv.conf /etc/resolv.conf; do
+    [ -r "$file" ] || continue
+
+    ns="$(awk '$1 == "nameserver" && $2 !~ /^127\./ { print $2 }' "$file")"
+
+    if [ -n "$ns" ]; then
+      printf -- '--dns\n%s\n' $ns
+      return
+    fi
+  done
+}
+
 seed_state() {
   mkdir -p "$DATA_DIR" "$CONFIG_DIR" "$STATE_DIR/routes" "$LOGS_DIR"
 
@@ -197,6 +238,14 @@ run_container() {
   # docker error, not a no-op.
   if [ -n "$CADDY_CPUS" ]; then
     args+=(--cpus "$CADDY_CPUS")
+  fi
+
+  local dns_args
+  mapfile -t dns_args < <(container_dns_args)
+
+  if [ "${#dns_args[@]}" -gt 0 ]; then
+    args+=("${dns_args[@]}")
+    log "resolvers: ${dns_args[*]} (voodu mesh first — services on other voodu hosts resolve by name)"
   fi
 
   log "memory limit $CADDY_MEMORY (swap $CADDY_MEMORY_SWAP, reservation $CADDY_MEMORY_RESERVATION)${CADDY_CPUS:+, cpus $CADDY_CPUS}"
