@@ -1,6 +1,10 @@
 package ingress
 
-import "fmt"
+import (
+	"fmt"
+	"sort"
+	"strings"
+)
 
 // AccessLogPath is the file (INSIDE the Caddy container) the access log
 // is written to. The install script bind-mounts /var/log/caddy from the
@@ -383,7 +387,52 @@ func tlsPolicies(routes []Route) []map[string]any {
 		out = append(out, policy)
 	}
 
+	sortPoliciesBySpecificity(out)
+
 	return out
+}
+
+// sortPoliciesBySpecificity orders policies so the one with the most
+// specific subject comes first. Caddy picks the FIRST automation
+// policy whose subjects match a name, so an on-demand wildcard such as
+// `*.*.clowk.dev` listed before an exact `console.voodu.clowk.dev`
+// captures that host: issuance then goes through the wildcard owner's
+// `ask` endpoint, which knows nothing about the console, answers 403,
+// and every TLS handshake fails with "internal error" while the
+// explicit policy below it is never consulted. Same rule the Caddyfile
+// adapter applies. Stable, so equally specific policies keep the order
+// of the routes that produced them.
+func sortPoliciesBySpecificity(policies []map[string]any) {
+	sort.SliceStable(policies, func(i, j int) bool {
+		wi, li := policySpecificity(policies[i])
+		wj, lj := policySpecificity(policies[j])
+
+		if wi != wj {
+			return wi < wj
+		}
+
+		return li > lj
+	})
+}
+
+// policySpecificity returns (fewest wildcards, most labels) across a
+// policy's subjects — the best subject decides, since one exact host
+// in a group is enough for that group to deserve first look.
+func policySpecificity(policy map[string]any) (wildcards, labels int) {
+	subjects, _ := policy["subjects"].([]string)
+
+	wildcards, labels = 1<<30, 0
+
+	for _, s := range subjects {
+		w := strings.Count(s, "*")
+		l := strings.Count(s, ".") + 1
+
+		if w < wildcards || (w == wildcards && l > labels) {
+			wildcards, labels = w, l
+		}
+	}
+
+	return wildcards, labels
 }
 
 // acmeIssuer returns the Caddy issuer blob for a provider name. Today

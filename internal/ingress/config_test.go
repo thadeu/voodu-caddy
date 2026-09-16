@@ -425,3 +425,70 @@ func mustContain(t *testing.T, blob, substr string) {
 		t.Errorf("missing %q in:\n%s", substr, blob)
 	}
 }
+
+// Caddy uses the FIRST automation policy whose subjects match, so an
+// on-demand wildcard declared before an exact host would swallow it and
+// route its issuance through the wildcard owner's ask endpoint. The
+// exact host must come out first regardless of route order.
+func TestBuildCaddyConfig_ExactHostPolicyPrecedesOnDemandWildcard(t *testing.T) {
+	routes := []Route{
+		{
+			App: "clowk-web", Host: "*.clowk.dev", Upstream: "web:3000",
+			TLSProvider: "letsencrypt", TLSEmail: "ssl@clowk.dev",
+			OnDemand: true, TLSAsk: "http://web.clowk:3000/internal/allow_domain",
+		},
+		{
+			App: "clowk-web", Host: "*.*.clowk.dev", Upstream: "web:3000",
+			TLSProvider: "letsencrypt", TLSEmail: "ssl@clowk.dev",
+			OnDemand: true, TLSAsk: "http://web.clowk:3000/internal/allow_domain",
+		},
+		{
+			App: "vdui-web", Host: "console.voodu.clowk.dev", Upstream: "web:3000",
+			TLSProvider: "letsencrypt", TLSEmail: "ops@clowk.in",
+		},
+	}
+
+	policies := tlsPolicies(routes)
+
+	if len(policies) != 2 {
+		t.Fatalf("expected 2 policies, got %d", len(policies))
+	}
+
+	first, _ := policies[0]["subjects"].([]string)
+
+	if len(first) != 1 || first[0] != "console.voodu.clowk.dev" {
+		t.Fatalf("exact host must be the first policy, got %v", first)
+	}
+
+	if _, onDemand := policies[0]["on_demand"]; onDemand {
+		t.Fatalf("exact host policy must not be on-demand")
+	}
+
+	second, _ := policies[1]["subjects"].([]string)
+
+	if strings.Join(second, ",") != "*.clowk.dev,*.*.clowk.dev" {
+		t.Fatalf("wildcard group should keep route order, got %v", second)
+	}
+}
+
+func TestPolicySpecificity(t *testing.T) {
+	cases := []struct {
+		subjects  []string
+		wildcards int
+		labels    int
+	}{
+		{[]string{"console.voodu.clowk.dev"}, 0, 4},
+		{[]string{"*.clowk.dev", "*.*.clowk.dev"}, 1, 3},
+		{[]string{"*.*.clowk.dev"}, 2, 4},
+		{[]string{"*.clowk.dev", "api.clowk.dev"}, 0, 3},
+		{nil, 1 << 30, 0},
+	}
+
+	for _, c := range cases {
+		w, l := policySpecificity(map[string]any{"subjects": c.subjects})
+
+		if w != c.wildcards || l != c.labels {
+			t.Errorf("%v: got (%d,%d), want (%d,%d)", c.subjects, w, l, c.wildcards, c.labels)
+		}
+	}
+}
