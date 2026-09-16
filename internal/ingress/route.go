@@ -190,9 +190,45 @@ func (s *Store) List() ([]Route, error) {
 		out = append(out, r)
 	}
 
-	sort.Slice(out, func(i, j int) bool { return out[i].App < out[j].App })
+	sortRoutes(out)
 
 	return out, nil
+}
+
+// sortRoutes orders routes by host specificity, then by app name.
+//
+// Caddy evaluates HTTP routes in order and each of ours is terminal, so
+// the first host matcher that fits a request wins. Sorting by app name
+// alone put clowk-web's `*.*.clowk.dev` before vdui-web's exact
+// `console.voodu.clowk.dev` and every console request was proxied to
+// the wrong app — the console's own /sign_in answered 404 while the
+// tenant app's /sign-in bounced visitors to app.clowk.dev. An exact
+// host must beat a wildcard that also covers it, and a deeper wildcard
+// (`*.*.x`) must beat a shallower one only where both fit, which
+// "fewest wildcards, then most labels" gives us. App name stays as the
+// tiebreak so the generated config is still deterministic.
+func sortRoutes(routes []Route) {
+	sort.SliceStable(routes, func(i, j int) bool {
+		wi, li := hostSpecificity(routes[i].Host)
+		wj, lj := hostSpecificity(routes[j].Host)
+
+		if wi != wj {
+			return wi < wj
+		}
+
+		if li != lj {
+			return li > lj
+		}
+
+		return routes[i].App < routes[j].App
+	})
+}
+
+// hostSpecificity returns the wildcard count and the label count of a
+// host pattern. Fewer wildcards means more specific; among equals,
+// more labels means more specific.
+func hostSpecificity(host string) (wildcards, labels int) {
+	return strings.Count(host, "*"), strings.Count(host, ".") + 1
 }
 
 // atomicWrite writes to a sibling temp file and renames. Two concurrent

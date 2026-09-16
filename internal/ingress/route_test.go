@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -94,3 +95,35 @@ func TestStorePut_RejectsInvalid(t *testing.T) {
 	}
 }
 
+// Exact hosts must be listed before wildcards that also cover them:
+// Caddy takes the first terminal route whose host matches, so ordering
+// by app name alone let clowk-web's `*.*.clowk.dev` swallow the
+// console's exact host.
+func TestSortRoutes_ExactHostBeforeCoveringWildcard(t *testing.T) {
+	routes := []Route{
+		{App: "clowk-web", Host: "*.clowk.dev"},
+		{App: "clowk-web", Host: "*.*.clowk.dev"},
+		{App: "contagorda-api", Host: "api.contagorda.com"},
+		{App: "vdui-web", Host: "console.voodu.clowk.dev"},
+		{App: "aaa-web", Host: "*.clowk.in"},
+	}
+
+	sortRoutes(routes)
+
+	got := make([]string, 0, len(routes))
+	for _, r := range routes {
+		got = append(got, r.Host)
+	}
+
+	want := []string{
+		"console.voodu.clowk.dev",
+		"api.contagorda.com",
+		"*.clowk.in",
+		"*.clowk.dev",
+		"*.*.clowk.dev",
+	}
+
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("order:\n got %v\nwant %v", got, want)
+	}
+}
