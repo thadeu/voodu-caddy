@@ -307,6 +307,11 @@ func TestBuildCaddyConfig_MultiUpstreamEmitsLBPolicy(t *testing.T) {
 	mustContain(t, blob, `"dial":"api-0:3000"`)
 	mustContain(t, blob, `"dial":"api-1:3000"`)
 	mustContain(t, blob, `"selection_policy":{"policy":"round_robin"}`)
+	// The hand-off defaults: a refused dial is retried on the other upstream
+	// instead of surfacing as a 502, and the dead one leaves rotation.
+	mustContain(t, blob, `"try_duration":"5s"`)
+	mustContain(t, blob, `"retries":3`)
+	mustContain(t, blob, `"passive":{"fail_duration":"10s","max_fails":1}`)
 }
 
 func TestBuildCaddyConfig_MultiUpstreamHonorsLBPolicy(t *testing.T) {
@@ -337,6 +342,10 @@ func TestBuildCaddyConfig_SingleUpstreamSkipsLBBlock(t *testing.T) {
 
 	if strings.Contains(blob, `"load_balancing"`) {
 		t.Errorf("single-upstream route should not carry load_balancing: %s", blob)
+	}
+
+	if strings.Contains(blob, `"health_checks"`) {
+		t.Errorf("single-upstream route without an interval should not carry health_checks: %s", blob)
 	}
 }
 
@@ -384,9 +393,14 @@ func TestBuildCaddyConfig_NoHCWhenIntervalOmitted(t *testing.T) {
 
 	blob := marshal(t, BuildCaddyConfig(routes))
 
-	if strings.Contains(blob, `"health_checks"`) {
+	// Passive observation is always on for a multi-upstream route (it is
+	// what takes a retired replica out of rotation); ACTIVE probing is the
+	// opt-in that LBInterval turns on.
+	if strings.Contains(blob, `"active"`) {
 		t.Errorf("no LBInterval should produce no active HC block: %s", blob)
 	}
+
+	mustContain(t, blob, `"passive"`)
 }
 
 func TestUpstreamForPort(t *testing.T) {

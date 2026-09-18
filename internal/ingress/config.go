@@ -264,24 +264,46 @@ func reverseProxyHandler(r Route) map[string]any {
 			policy = "round_robin"
 		}
 
+		// A route with several upstreams exists mostly for the moment one of
+		// them is going away: a rolling deploy publishes old+new, then
+		// removes the old. Caddy's own defaults do nothing with that —
+		// try_duration 0 means a refused dial is a 502 for that request,
+		// and without a passive check the dead upstream stays in rotation,
+		// so half the traffic fails until the next republish. These
+		// defaults make the hand-off invisible: retry the other upstream
+		// for up to 5s, and park an upstream that failed for 10s.
 		h["load_balancing"] = map[string]any{
 			"selection_policy": map[string]any{"policy": policy},
+			"retries":          3,
+			"try_duration":     "5s",
+			"try_interval":     "250ms",
 		}
 	}
 
-	if r.LBInterval != "" {
-		path := r.HealthCheckPath
-		if path == "" {
-			path = "/"
+	if len(upstreams) > 1 || r.LBInterval != "" {
+		hc := map[string]any{}
+
+		if len(upstreams) > 1 {
+			hc["passive"] = map[string]any{
+				"fail_duration": "10s",
+				"max_fails":     1,
+			}
 		}
 
-		h["health_checks"] = map[string]any{
-			"active": map[string]any{
+		if r.LBInterval != "" {
+			path := r.HealthCheckPath
+			if path == "" {
+				path = "/"
+			}
+
+			hc["active"] = map[string]any{
 				"uri":      path,
 				"interval": r.LBInterval,
 				"timeout":  r.LBInterval,
-			},
+			}
 		}
+
+		h["health_checks"] = hc
 	}
 
 	return h
