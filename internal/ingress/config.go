@@ -59,7 +59,15 @@ const AccessLogPath = "/var/log/caddy/access.log"
 func BuildCaddyConfig(routes []Route) map[string]any {
 	httpRoutes := make([]map[string]any, 0, len(routes))
 
+	var tcpRoutes []Route
+
 	for _, r := range routes {
+		if r.IsTCP() {
+			tcpRoutes = append(tcpRoutes, r)
+
+			continue
+		}
+
 		httpRoutes = append(httpRoutes, caddyRoutesFor(r)...)
 	}
 
@@ -150,11 +158,91 @@ func BuildCaddyConfig(routes []Route) map[string]any {
 		},
 	}
 
+	apps := cfg["apps"].(map[string]any)
+
 	if tls := tlsAppConfig(routes); tls != nil {
-		cfg["apps"].(map[string]any)["tls"] = tls
+		apps["tls"] = tls
+	}
+
+	if len(tcpRoutes) > 0 {
+		apps["layer4"] = layer4AppConfig(tcpRoutes)
 	}
 
 	return cfg
+}
+
+// layer4AppConfig builds the `apps.layer4` block for TCP routes: one
+// server for each listen port, and in it one route for each host. A
+// route matches the SNI of the TLS handshake, ends TLS with the
+// certificate that the tls app manages for that host, and proxies plain
+// TCP to the upstreams. A name with no route gets no TLS handshake.
+// Needs the caddy-l4 module, which the voodu-caddy image carries.
+func layer4AppConfig(routes []Route) map[string]any {
+	byPort := map[int][]map[string]any{}
+
+	var ports []int
+
+	for _, r := range routes {
+		if _, seen := byPort[r.TCPListen]; !seen {
+			ports = append(ports, r.TCPListen)
+		}
+
+		byPort[r.TCPListen] = append(byPort[r.TCPListen], layer4Route(r))
+	}
+
+	sort.Ints(ports)
+
+	servers := map[string]any{}
+
+	for _, port := range ports {
+		servers[fmt.Sprintf("tcp-%d", port)] = map[string]any{
+			"listen": []string{fmt.Sprintf(":%d", port)},
+			"routes": byPort[port],
+		}
+	}
+
+	return map[string]any{"servers": servers}
+}
+
+func layer4Route(r Route) map[string]any {
+	upstreams := r.Upstreams
+
+	if len(upstreams) == 0 && r.Upstream != "" {
+		upstreams = []string{r.Upstream}
+	}
+
+	dials := make([]map[string]any, 0, len(upstreams))
+
+	for _, u := range upstreams {
+		dials = append(dials, map[string]any{"dial": []string{u}})
+	}
+
+	proxy := map[string]any{
+		"handler":   "proxy",
+		"upstreams": dials,
+	}
+
+	if len(dials) > 1 {
+		policy := r.LBPolicy
+
+		if policy == "" {
+			policy = "round_robin"
+		}
+
+		proxy["load_balancing"] = map[string]any{
+			"selection": map[string]any{"policy": policy},
+		}
+	}
+
+	return map[string]any{
+		"match": []map[string]any{
+			{"tls": map[string]any{"sni": []string{r.Host}}},
+		},
+		"handle": []map[string]any{
+			{"handler": "tls"},
+			proxy,
+		},
+	}
 }
 
 // caddyRoutesFor expands a Route into one or more Caddy routes. Without
@@ -319,10 +407,13 @@ func pathPatterns(p string) []string {
 // tlsAppConfig assembles the whole `apps.tls` block. Returns nil when
 // no route needs TLS at all (pure HTTP fleet).
 func tlsAppConfig(routes []Route) map[string]any {
-	policies := tlsPolicies(routes)
+	policies := append(tlsPolicies(routes), internalTCPPolicies(routes)...)
 	ask := onDemandAsk(routes)
+	automate := tcpHosts(routes)
 
-	if len(policies) == 0 && ask == "" {
+	sortPoliciesBySpecificity(policies)
+
+	if len(policies) == 0 && ask == "" && len(automate) == 0 {
 		return nil
 	}
 
@@ -341,7 +432,56 @@ func tlsAppConfig(routes []Route) map[string]any {
 		}
 	}
 
-	return map[string]any{"automation": automation}
+	out := map[string]any{"automation": automation}
+
+	// The http app manages the certificates of its own hosts. A TCP host
+	// is not in the http app, so the tls app must be told to keep a
+	// certificate for it, or the layer4 tls handler has none to serve.
+	if len(automate) > 0 {
+		out["certificates"] = map[string]any{"automate": automate}
+	}
+
+	return out
+}
+
+// tcpHosts lists the hosts of TCP routes, once each, in route order.
+func tcpHosts(routes []Route) []string {
+	seen := map[string]bool{}
+
+	var hosts []string
+
+	for _, r := range routes {
+		if !r.IsTCP() || seen[r.Host] {
+			continue
+		}
+
+		seen[r.Host] = true
+		hosts = append(hosts, r.Host)
+	}
+
+	return hosts
+}
+
+// internalTCPPolicies gives the TCP hosts with the "internal" provider
+// Caddy's own CA. An HTTP route with that provider gets it through the
+// http app's automatic HTTPS; a TCP host has no such path.
+func internalTCPPolicies(routes []Route) []map[string]any {
+	var hosts []string
+
+	for _, r := range routes {
+		if r.IsTCP() && r.TLSProvider == "internal" {
+			hosts = append(hosts, r.Host)
+		}
+	}
+
+	if len(hosts) == 0 {
+		return nil
+	}
+
+	return []map[string]any{{
+		"subjects": hosts,
+		"issuers":  []map[string]any{{"module": "internal"}},
+	}}
 }
 
 // onDemandAsk returns the first non-empty TLSAsk on any on-demand route.

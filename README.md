@@ -13,11 +13,42 @@ route per manifest — into a Caddy config loaded atomically via `POST
 voodu plugins:install github.com/thadeu/voodu-caddy
 ```
 
-The `install` script pulls the official `caddy:2.8` image and runs it
-as a `voodu-caddy` container on the `voodu0` docker network (shared
-with Voodu-managed apps). Ports `:80` / `:443` are published for
-ingress; the Admin API is published to `127.0.0.1:2019` on the host
-only, matching the security posture of the old systemd-based setup.
+The `install` script pulls the `ghcr.io/thadeu/voodu-caddy:<version>`
+image and runs it as a `voodu-caddy` container on the `voodu0` docker
+network (shared with Voodu-managed apps). Ports `:80` / `:443` are
+published for ingress; the Admin API is published to `127.0.0.1:2019`
+on the host only, matching the security posture of the old
+systemd-based setup.
+
+### The image
+
+The image is Caddy 2.11 with two modules that stock Caddy lacks, built
+by the `Dockerfile` of this repository and published by the release
+workflow for amd64 and arm64:
+
+| Module | For |
+|---|---|
+| `caddy-l4` | `tcp {}` ingresses: TCP with TLS, routed by SNI |
+| `caddy-dns/cloudflare` | the DNS-01 challenge, for wildcard certificates |
+
+To roll back to stock Caddy, which serves HTTP ingresses only:
+
+```sh
+CADDY_IMAGE=caddy:2.8 voodu plugins:install github.com/thadeu/voodu-caddy
+```
+
+The routes and certificates live on the host (`/opt/voodu/caddy`), so
+a change of image keeps them. Each install replaces the container, so
+the HTTP ingress of the host stops for a few seconds.
+
+### TCP ports
+
+A `tcp {}` ingress needs its public port published. List the ports in
+`VOODU_CADDY_TCP_PORTS`, comma separated. Empty publishes none:
+
+```sh
+VOODU_CADDY_TCP_PORTS=7419 voodu plugins:install github.com/thadeu/voodu-caddy
+```
 
 The container uses `--restart=unless-stopped`, so the docker daemon
 restores it across reboots without needing a systemd unit.
@@ -255,6 +286,37 @@ ingress "tenants" {
 }
 ```
 
+## TCP with TLS, chosen by SNI
+
+An ingress with a `tcp {}` block is a TCP route, not an HTTP route.
+Caddy listens on the `listen` port with the layer4 app, ends TLS, picks
+the route by the name that the client sends in the TLS handshake (SNI),
+and proxies plain TCP to the upstreams. Many hosts share one port, one
+route each, and a name with no route gets no handshake.
+
+```hcl
+ingress "cloud" "paris-roma" {
+  host    = "paris--roma.eu-de-1.anway.clowk.in"
+  service = "paris-roma"
+  port    = 7419
+
+  tcp {
+    listen = 7419
+  }
+
+  tls {}
+}
+```
+
+- `tls {}` is required, because SNI exists only in a TLS handshake.
+- The host must be exact. Wildcards and on-demand TLS are refused, so a
+  name that reaches the port cannot mint a certificate.
+- `location {}` blocks are refused, because TCP has no paths.
+- The certificate of each host comes from the same provider as an HTTP
+  route: Let's Encrypt by default, or `provider = "internal"`.
+- The controller sends the route as `VOODU_INGRESS_TCP_LISTEN`. A
+  controller that does not know `tcp {}` sends an HTTP route, as before.
+
 ## What is not supported (yet)
 
 | Case                                           | Status |
@@ -327,21 +389,23 @@ a new version is three steps:
    ```yaml
    # plugin.yml
    name: caddy
-   version: 0.2.0   # ← bump here
+   version: 1.1.0   # ← bump here
    ```
 
 2. **Commit and tag** — the tag must be `v` + the exact `plugin.yml`
    version, or the release workflow refuses to publish:
 
    ```sh
-   git commit -am "release v0.2.0"
-   git tag v0.2.0
+   git commit -am "release v1.1.0"
+   git tag v1.1.0
    git push && git push --tags
    ```
 
 3. **Wait for GitHub Actions** — `.github/workflows/release.yml` runs
-   `make cross` and uploads `voodu-caddy_linux_amd64` and
-   `voodu-caddy_linux_arm64` to the release. Once green, existing and
+   the tests, builds the image and pushes it as
+   `ghcr.io/thadeu/voodu-caddy:<version>`, then runs `make cross` and
+   uploads `voodu-caddy_linux_amd64` and `voodu-caddy_linux_arm64` to
+   the release. Once green, existing and
    new installs that run `voodu plugins:install` will pull the new
    binary (the `install` hook is idempotent — it re-downloads only
    when the on-disk binary's `--version` does not match `plugin.yml`).

@@ -55,6 +55,7 @@ const (
 	envIngressLBPolicy  = "VOODU_INGRESS_LB_POLICY"
 	envIngressLBInterval = "VOODU_INGRESS_LB_INTERVAL"
 	envIngressHCPath    = "VOODU_INGRESS_HC_PATH"
+	envIngressTCPListen = "VOODU_INGRESS_TCP_LISTEN"
 	envCaddyAdminURL    = "VOODU_CADDY_ADMIN_URL"
 	envCaddyStateDir   = "VOODU_CADDY_STATE_DIR"
 	defaultStateDir    = "/opt/voodu/caddy"
@@ -112,6 +113,8 @@ type runEnv struct {
 	lbPolicy                            string
 	lbInterval                          string
 	hcPath                              string
+	tcpListen                           int
+	tcpListenErr                        error
 	adminURL, stateDir                  string
 }
 
@@ -123,6 +126,7 @@ func readEnv() runEnv {
 		dir = defaultStateDir
 	}
 
+	tcpListen, tcpErr := parseListen(os.Getenv(envIngressTCPListen))
 	locs, locErr := parseLocations(os.Getenv(envIngressLocations))
 	ups, upsErr := parseUpstreams(os.Getenv(envIngressUpstreams))
 
@@ -143,6 +147,8 @@ func readEnv() runEnv {
 		lbPolicy:     os.Getenv(envIngressLBPolicy),
 		lbInterval:   os.Getenv(envIngressLBInterval),
 		hcPath:       os.Getenv(envIngressHCPath),
+		tcpListen:    tcpListen,
+		tcpListenErr: tcpErr,
 		adminURL:     os.Getenv(envCaddyAdminURL),
 		stateDir:     dir,
 	}
@@ -181,6 +187,24 @@ func parseUpstreams(raw string) ([]string, error) {
 	return out, nil
 }
 
+// parseListen reads the public port of a TCP route. Empty means an HTTP
+// route.
+func parseListen(raw string) (int, error) {
+	raw = strings.TrimSpace(raw)
+
+	if raw == "" {
+		return 0, nil
+	}
+
+	port, err := strconv.Atoi(raw)
+
+	if err != nil || port <= 0 {
+		return 0, fmt.Errorf("%s: %q is not a port", envIngressTCPListen, raw)
+	}
+
+	return port, nil
+}
+
 // parseLocations decodes the JSON blob the controller exports for
 // path-based routing. Empty string means "no locations" (catch-all),
 // which is the overwhelmingly common case — not an error.
@@ -215,6 +239,10 @@ func cmdApply(store *ingress.Store, client *caddyapi.Client, e runEnv) error {
 		return e.upstreamsErr
 	}
 
+	if e.tcpListenErr != nil {
+		return e.tcpListenErr
+	}
+
 	// Single-upstream fallback — used when the controller didn't export
 	// VOODU_INGRESS_UPSTREAMS (older controller or single-replica app
 	// where the legacy SERVICE/PORT pair is enough).
@@ -232,6 +260,7 @@ func cmdApply(store *ingress.Store, client *caddyapi.Client, e runEnv) error {
 		LBInterval:      e.lbInterval,
 		HealthCheckPath: e.hcPath,
 		Locations:       e.locations,
+		TCPListen:       e.tcpListen,
 	}
 
 	if e.tls {
@@ -269,6 +298,10 @@ func cmdApply(store *ingress.Store, client *caddyapi.Client, e runEnv) error {
 	}
 
 	url := fmt.Sprintf("%s://%s", scheme, e.host)
+
+	if route.IsTCP() {
+		url = fmt.Sprintf("tls://%s:%d", e.host, e.tcpListen)
+	}
 
 	emit(envelope{
 		Status: "ok",

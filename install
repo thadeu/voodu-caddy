@@ -4,8 +4,9 @@
 # Responsibilities:
 #   1. Download the voodu-caddy plugin binary into $VOODU_PLUGIN_DIR/bin/voodu-caddy
 #   2. Ensure the `voodu0` docker network exists (shared with apps)
-#   3. Run official Caddy image as container `voodu-caddy` on voodu0,
-#      publishing :80/:443 (ingress) and 127.0.0.1:2019 (Admin API)
+#   3. Run the voodu-caddy image as container `voodu-caddy` on voodu0,
+#      publishing :80/:443 (ingress), the TCP ports in
+#      $VOODU_CADDY_TCP_PORTS, and 127.0.0.1:2019 (Admin API)
 #   4. Seed an empty bootstrap config so Caddy starts on a fresh machine
 #
 # Idempotent: safe to run repeatedly. Re-runs stop+replace the container
@@ -13,7 +14,18 @@
 
 set -euo pipefail
 
-CADDY_IMAGE="${CADDY_IMAGE:-caddy:2.8}"
+# The image is Caddy with the caddy-l4 module, which serves `tcp {}`
+# ingresses, built and published by this repository (Dockerfile). Its tag
+# follows the plugin version. To roll back to stock Caddy, which serves
+# HTTP ingresses only:
+#
+#   CADDY_IMAGE=caddy:2.8 voodu plugins:install thadeu/voodu-caddy
+CADDY_IMAGE="${CADDY_IMAGE:-}"
+
+# Public TCP ports for `tcp {}` ingresses, comma separated, such as
+# "7419". Each one is published on all interfaces. Empty publishes none,
+# so a host without TCP routes opens no new port.
+CADDY_TCP_PORTS="${VOODU_CADDY_TCP_PORTS:-}"
 CADDY_NETWORK="${CADDY_NETWORK:-voodu0}"
 STATE_DIR="${VOODU_CADDY_STATE_DIR:-/opt/voodu/caddy}"
 DATA_DIR="$STATE_DIR/data"
@@ -191,6 +203,36 @@ JSON
   fi
 }
 
+# default_image is the voodu-caddy image of this plugin version, used
+# when the operator set no CADDY_IMAGE.
+default_image() {
+  local version
+  version="$(grep '^version:' "$PLUGIN_DIR/plugin.yml" | awk '{print $2}')"
+
+  echo "ghcr.io/thadeu/voodu-caddy:${version}"
+}
+
+# tcp_port_args turns VOODU_CADDY_TCP_PORTS into docker -p flags, and
+# refuses a value that is not a port before any container is touched.
+tcp_port_args() {
+  local ports port
+  IFS=',' read -ra ports <<< "$CADDY_TCP_PORTS"
+
+  for port in "${ports[@]}"; do
+    port="${port//[[:space:]]/}"
+
+    [ -z "$port" ] && continue
+
+    if ! [[ "$port" =~ ^[0-9]+$ ]] || [ "$port" -lt 1 ] || [ "$port" -gt 65535 ]; then
+      log "VOODU_CADDY_TCP_PORTS: $port is not a port" >&2
+      exit 1
+    fi
+
+    echo "-p"
+    echo "${port}:${port}"
+  done
+}
+
 pull_image() {
   # Pull once per install so the `docker run` step below doesn't block
   # on an implicit pull (which would dump progress into stderr and
@@ -233,6 +275,14 @@ run_container() {
     -v "$CONFIG_DIR:/config"
     -v "$LOGS_DIR:/var/log/caddy"
   )
+
+  local tcp_args
+  mapfile -t tcp_args < <(tcp_port_args)
+
+  if [ "${#tcp_args[@]}" -gt 0 ]; then
+    args+=("${tcp_args[@]}")
+    log "tcp ports: $CADDY_TCP_PORTS"
+  fi
 
   # Appended only when the operator asked for it — an empty --cpus is a
   # docker error, not a no-op.
@@ -281,6 +331,14 @@ main() {
     log "docker is required but not found on PATH" >&2
     exit 1
   fi
+
+  if [ -z "$CADDY_IMAGE" ]; then
+    CADDY_IMAGE="$(default_image)"
+  fi
+
+  # Checked before the old container goes away, so a bad value changes
+  # nothing.
+  tcp_port_args >/dev/null
 
   install_voodu_caddy
   ensure_network

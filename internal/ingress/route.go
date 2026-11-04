@@ -81,7 +81,16 @@ type Route struct {
 	// cert ("is this tenant hostname allowed?"). Required when OnDemand
 	// is true; ignored otherwise.
 	TLSAsk string `json:"tls_ask,omitempty"`
+
+	// TCPListen, when set, makes this a TCP route with TLS instead of an
+	// HTTP route: Caddy listens on this port with the layer4 app, ends
+	// TLS, picks the route by SNI, and proxies plain TCP to the
+	// upstreams. Many hosts share one port, one route each.
+	TCPListen int `json:"tcp_listen,omitempty"`
 }
+
+// IsTCP reports whether the route is a TCP route with TLS.
+func (r Route) IsTCP() bool { return r.TCPListen > 0 }
 
 // Key is the stable lookup key for a route (its app name). Used as the
 // filename under routes/ and as the map key when rebuilding config.
@@ -101,6 +110,38 @@ func (r Route) Validate() error {
 
 	if r.Upstream == "" && len(r.Upstreams) == 0 {
 		return fmt.Errorf("route %q: upstream is required", r.App)
+	}
+
+	if r.IsTCP() {
+		return r.validateTCP()
+	}
+
+	return nil
+}
+
+// validateTCP refuses a TCP route that Caddy cannot serve. SNI exists
+// only in a TLS handshake, so TLS is required; TCP has no paths; and an
+// on-demand certificate would let any name that reaches the port mint
+// one, so each TCP host gets its own certificate up front.
+func (r Route) validateTCP() error {
+	if r.TCPListen > 65535 {
+		return fmt.Errorf("route %q: tcp listen %d is not a port", r.App, r.TCPListen)
+	}
+
+	if r.TLSProvider == "" {
+		return fmt.Errorf("route %q: a tcp route needs tls, because the route is chosen by SNI", r.App)
+	}
+
+	if len(r.Locations) > 0 {
+		return fmt.Errorf("route %q: a tcp route takes no locations", r.App)
+	}
+
+	if r.OnDemand {
+		return fmt.Errorf("route %q: a tcp route cannot use on-demand tls", r.App)
+	}
+
+	if strings.Contains(r.Host, "*") {
+		return fmt.Errorf("route %q: a tcp route needs an exact host, not %q", r.App, r.Host)
 	}
 
 	return nil
