@@ -8,9 +8,15 @@
 # install hook. Versions are pinned, so a rebuild is the same image.
 ARG CADDY_VERSION=2.11
 
-FROM caddy:${CADDY_VERSION}-builder AS builder
+# The builder runs on the platform of the build machine and cross-compiles
+# for the target with GOOS and GOARCH. Compiling Go under QEMU emulation
+# for arm64 is 10 to 20 times slower.
+FROM --platform=$BUILDPLATFORM caddy:${CADDY_VERSION}-builder AS builder
 
-RUN xcaddy build \
+ARG TARGETOS
+ARG TARGETARCH
+
+RUN GOOS=$TARGETOS GOARCH=$TARGETARCH xcaddy build \
   --with github.com/mholt/caddy-l4@v0.1.2 \
   --with github.com/caddy-dns/cloudflare@v0.2.4
 
