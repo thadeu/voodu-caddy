@@ -160,6 +160,19 @@ func BuildCaddyConfig(routes []Route) map[string]any {
 
 	apps := cfg["apps"].(map[string]any)
 
+	// Caddy 2.10+ does not get a certificate for a host that a managed
+	// wildcard covers, and waits for the wildcard certificate. An
+	// on-demand wildcard never gets one, so an explicit host below it
+	// (hallel.clowk.dev under *.clowk.dev) had no certificate at all.
+	// Skipping the on-demand wildcards keeps them out of the managed
+	// names; the on-demand policy still issues their subdomains at the
+	// handshake.
+	if skip := onDemandWildcards(routes); len(skip) > 0 {
+		server := apps["http"].(map[string]any)["servers"].(map[string]any)["voodu"].(map[string]any)
+
+		server["automatic_https"] = map[string]any{"skip_certificates": skip}
+	}
+
 	if tls := tlsAppConfig(routes); tls != nil {
 		apps["tls"] = tls
 	}
@@ -487,6 +500,30 @@ func internalTCPPolicies(routes []Route) []map[string]any {
 		"subjects": hosts,
 		"issuers":  []map[string]any{{"module": "internal"}},
 	}}
+}
+
+// onDemandWildcards returns the sorted wildcard hosts of on-demand HTTP
+// routes, without duplicates.
+func onDemandWildcards(routes []Route) []string {
+	seen := map[string]bool{}
+
+	for _, r := range routes {
+		if r.IsTCP() || !r.OnDemand || !strings.HasPrefix(r.Host, "*.") {
+			continue
+		}
+
+		seen[r.Host] = true
+	}
+
+	out := make([]string, 0, len(seen))
+
+	for host := range seen {
+		out = append(out, host)
+	}
+
+	sort.Strings(out)
+
+	return out
 }
 
 // onDemandAsk returns the first non-empty TLSAsk on any on-demand route.

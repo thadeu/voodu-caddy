@@ -506,3 +506,46 @@ func TestPolicySpecificity(t *testing.T) {
 		}
 	}
 }
+
+// Caddy 2.10+ skips the certificate of a host under a managed wildcard.
+// An on-demand wildcard never gets a certificate, so the explicit host
+// must stay managed and the on-demand wildcards must be skipped.
+func TestBuildCaddyConfig_SkipsOnDemandWildcardCertificates(t *testing.T) {
+	routes := []Route{
+		{
+			App: "clowk-web", Host: "*.clowk.dev", Upstream: "web:3000",
+			TLSProvider: "letsencrypt", TLSEmail: "ssl@clowk.dev",
+			OnDemand: true, TLSAsk: "http://web.clowk:3000/internal/allow_domain",
+		},
+		{
+			App: "clowk-web2", Host: "*.clowk.dev", Upstream: "web:3000",
+			TLSProvider: "letsencrypt", TLSEmail: "ssl@clowk.dev",
+			OnDemand: true, TLSAsk: "http://web.clowk:3000/internal/allow_domain",
+		},
+		{
+			App: "clowk-web", Host: "*.*.clowk.dev", Upstream: "web:3000",
+			TLSProvider: "letsencrypt", TLSEmail: "ssl@clowk.dev",
+			OnDemand: true, TLSAsk: "http://web.clowk:3000/internal/allow_domain",
+		},
+		{
+			App: "hallel", Host: "hallel.clowk.dev", Upstream: "hallel:3000",
+			TLSProvider: "letsencrypt", TLSEmail: "ssl@clowk.dev",
+		},
+	}
+
+	blob := marshal(t, BuildCaddyConfig(routes))
+
+	mustContain(t, blob, `"automatic_https":{"skip_certificates":["*.*.clowk.dev","*.clowk.dev"]}`)
+}
+
+func TestBuildCaddyConfig_NoSkipWithoutOnDemandWildcard(t *testing.T) {
+	routes := []Route{
+		{App: "hallel", Host: "hallel.clowk.dev", Upstream: "hallel:3000", TLSProvider: "letsencrypt", TLSEmail: "ssl@clowk.dev"},
+	}
+
+	blob := marshal(t, BuildCaddyConfig(routes))
+
+	if strings.Contains(blob, "skip_certificates") {
+		t.Fatalf("no on-demand wildcard, no skip: %s", blob)
+	}
+}
