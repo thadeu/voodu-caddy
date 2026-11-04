@@ -14,12 +14,24 @@
 
 set -euo pipefail
 
+# The controller runs this hook with its own environment, so a variable
+# set in the shell of `voodu plugins:install` does not reach it. Settings
+# that must survive every install go in this file, one VAR=value per
+# line, for example VOODU_CADDY_TCP_PORTS=7419.
+INSTALL_ENV="${VOODU_CADDY_INSTALL_ENV:-/opt/voodu/caddy/install.env}"
+
+if [ -f "$INSTALL_ENV" ]; then
+  set -a
+  # shellcheck disable=SC1090
+  . "$INSTALL_ENV"
+  set +a
+fi
+
 # The image is Caddy with the caddy-l4 module, which serves `tcp {}`
 # ingresses, built and published by this repository (Dockerfile). Its tag
 # follows the plugin version. To roll back to stock Caddy, which serves
-# HTTP ingresses only:
-#
-#   CADDY_IMAGE=caddy:2.8 voodu plugins:install thadeu/voodu-caddy
+# HTTP ingresses only, put CADDY_IMAGE=caddy:2.8 in $INSTALL_ENV and
+# install again.
 CADDY_IMAGE="${CADDY_IMAGE:-}"
 
 # Public TCP ports for `tcp {}` ingresses, comma separated, such as

@@ -31,10 +31,18 @@ workflow for amd64 and arm64:
 | `caddy-l4` | `tcp {}` ingresses: TCP with TLS, routed by SNI |
 | `caddy-dns/cloudflare` | the DNS-01 challenge, for wildcard certificates |
 
+### Install settings
+
+The controller runs the install hook with its own environment, so a
+variable set in the shell of `voodu plugins:install` does not reach it.
+Put the settings in `/opt/voodu/caddy/install.env` on the host, one
+`VAR=value` per line. Each install reads this file.
+
 To roll back to stock Caddy, which serves HTTP ingresses only:
 
 ```sh
-CADDY_IMAGE=caddy:2.8 voodu plugins:install github.com/thadeu/voodu-caddy
+echo 'CADDY_IMAGE=caddy:2.8' >> /opt/voodu/caddy/install.env
+voodu plugins:install github.com/thadeu/voodu-caddy
 ```
 
 The routes and certificates live on the host (`/opt/voodu/caddy`), so
@@ -44,10 +52,12 @@ the HTTP ingress of the host stops for a few seconds.
 ### TCP ports
 
 A `tcp {}` ingress needs its public port published. List the ports in
-`VOODU_CADDY_TCP_PORTS`, comma separated. Empty publishes none:
+`VOODU_CADDY_TCP_PORTS` in `install.env`, comma separated. Empty
+publishes none:
 
 ```sh
-VOODU_CADDY_TCP_PORTS=7419 voodu plugins:install github.com/thadeu/voodu-caddy
+echo 'VOODU_CADDY_TCP_PORTS=7419' >> /opt/voodu/caddy/install.env
+voodu plugins:install github.com/thadeu/voodu-caddy
 ```
 
 The container uses `--restart=unless-stopped`, so the docker daemon
