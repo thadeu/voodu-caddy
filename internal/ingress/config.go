@@ -424,11 +424,16 @@ func tlsAppConfig(routes []Route) map[string]any {
 	}
 
 	if ask != "" {
-		// Caddy's `on_demand.ask` is global — a single URL gates every
+		// The on-demand gate is global: a single URL approves every
 		// on-demand issuance. We take the first non-empty Ask; the plugin
-		// boundary enforces that all on-demand routes agree.
+		// boundary enforces that all on-demand routes agree. Caddy 2.11
+		// refuses the old `ask` field, so the gate is the `http`
+		// permission module, which Caddy 2.8 also reads.
 		automation["on_demand"] = map[string]any{
-			"ask": ask,
+			"permission": map[string]any{
+				"module":   "http",
+				"endpoint": ask,
+			},
 		}
 	}
 

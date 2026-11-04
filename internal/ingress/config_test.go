@@ -153,7 +153,7 @@ func TestBuildCaddyConfig_OnDemandWildcard(t *testing.T) {
 
 	mustContain(t, blob, `"host":["*.clowk.in"]`)
 	mustContain(t, blob, `"on_demand":true`)
-	mustContain(t, blob, `"ask":"http://app:3000/internal/allow_domain"`)
+	mustContain(t, blob, `"permission":{"endpoint":"http://app:3000/internal/allow_domain","module":"http"}`)
 	mustContain(t, blob, `"ssl@clowk.dev"`)
 
 	// Wildcard subject still gets issued via the configured ACME provider —
@@ -185,7 +185,7 @@ func TestBuildCaddyConfig_OnDemandAndStaticCoexist(t *testing.T) {
 
 	// The ask URL is global under automation.on_demand.ask, not inside a policy.
 	mustContain(t, blob, `"automation":{`)
-	mustContain(t, blob, `"ask":"http://app:3000/internal/allow_domain"`)
+	mustContain(t, blob, `"permission":{"endpoint":"http://app:3000/internal/allow_domain","module":"http"}`)
 }
 
 func TestBuildCaddyConfig_OnDemandWithoutProviderEmitsPolicy(t *testing.T) {

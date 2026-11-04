@@ -242,6 +242,24 @@ pull_image() {
   docker pull --quiet "$CADDY_IMAGE" >/dev/null
 }
 
+migrate_autosave() {
+  # Caddy 2.11 refuses the old on-demand gate `"on_demand":{"ask":URL}`,
+  # and --resume loads the saved config before the plugin can send a new
+  # one. Rewrite the gate to the `http` permission module, which Caddy
+  # 2.8 also reads, so the new container starts with the routes it had.
+  local autosave="$CONFIG_DIR/caddy/autosave.json"
+
+  if [ ! -f "$autosave" ] || ! grep -q '"on_demand":{"ask":' "$autosave"; then
+    return
+  fi
+
+  log "migrating on_demand.ask to the permission module in $autosave"
+
+  cp "$autosave" "$autosave.bak"
+
+  sed -E -i 's|"on_demand":\{"ask":"([^"]*)"\}|"on_demand":{"permission":{"endpoint":"\1","module":"http"}}|' "$autosave"
+}
+
 run_container() {
   # Stop+remove any pre-existing container so flag changes (new ports,
   # new mounts, new image pin) propagate. The state dirs are on the
@@ -344,6 +362,7 @@ main() {
   ensure_network
   seed_state
   pull_image
+  migrate_autosave
   run_container
 }
 
