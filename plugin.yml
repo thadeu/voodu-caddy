@@ -1,5 +1,5 @@
 name: caddy
-version: 1.0.3
+version: 1.0.5
 description: Voodu ingress plugin backed by Caddy Admin API
 homepage: https://github.com/thadeu/voodu-caddy
 
