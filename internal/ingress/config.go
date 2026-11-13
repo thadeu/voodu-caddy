@@ -152,6 +152,9 @@ func BuildCaddyConfig(routes []Route) map[string]any {
 						// declared above (matched via the include filter
 						// on http.log.access.voodu).
 						"logs": map[string]any{},
+						// 502/503/504 from the proxy get the edge error page
+						// (errors.go) instead of an empty body.
+						"errors": errorsConfig(),
 					},
 				},
 			},
@@ -329,14 +332,18 @@ func locationRoute(r Route, loc Location) map[string]any {
 	}
 }
 
+// singleUpstreamTryDuration is how long a single-upstream route holds a
+// request while its only upstream is down (a pod being replaced).
+const singleUpstreamTryDuration = "30s"
+
 // reverseProxyHandler builds a Caddy reverse_proxy block for r.
 //
 // Upstream selection:
 //
 //   - If Upstreams has 2+ entries, emit one dial per replica plus
 //     load_balancing.selection_policy (default "round_robin").
-//   - If Upstreams has exactly 1 entry, emit that — single-upstream
-//     routes skip the LB block to keep the config noise-free.
+//   - If Upstreams has exactly 1 entry, emit that, with try_duration so a
+//     pod replaced in place is waited for instead of a 503.
 //   - Otherwise fall back to r.Upstream (legacy single-upstream path,
 //     still used by older controllers that predate replica awareness).
 //
@@ -357,6 +364,18 @@ func reverseProxyHandler(r Route) map[string]any {
 	h := map[string]any{
 		"handler":   "reverse_proxy",
 		"upstreams": dials,
+	}
+
+	// One upstream is the route of a deployment that replaces its pod in
+	// place (a pinned host port: no surge). Between the old container going
+	// and the new one answering /up, the only upstream is down, and Caddy
+	// answered 503 at once. Holding the request instead — retry every 250ms
+	// for up to 30s — turns the deploy into one slow page, not an error.
+	if len(upstreams) == 1 {
+		h["load_balancing"] = map[string]any{
+			"try_duration": singleUpstreamTryDuration,
+			"try_interval": "250ms",
+		}
 	}
 
 	if len(upstreams) > 1 {

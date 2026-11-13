@@ -329,19 +329,21 @@ func TestBuildCaddyConfig_MultiUpstreamHonorsLBPolicy(t *testing.T) {
 	mustContain(t, blob, `"selection_policy":{"policy":"least_conn"}`)
 }
 
-func TestBuildCaddyConfig_SingleUpstreamSkipsLBBlock(t *testing.T) {
-	// Single-replica deployments are the common case; emitting a
-	// load_balancing block there is noise. Caddy behaves identically
-	// with or without it, but operators reading the config dump
-	// shouldn't see knobs that don't apply.
+func TestBuildCaddyConfig_SingleUpstreamHoldsRequestsDuringSwap(t *testing.T) {
+	// A single-replica deployment that replaces its pod in place has no
+	// upstream for a moment. The route waits for it instead of a 503, and
+	// carries no selection policy (there is nothing to choose between).
 	routes := []Route{
 		{App: "api", Host: "api.example.com", Upstream: "api:3000"},
 	}
 
 	blob := marshal(t, BuildCaddyConfig(routes))
 
-	if strings.Contains(blob, `"load_balancing"`) {
-		t.Errorf("single-upstream route should not carry load_balancing: %s", blob)
+	mustContain(t, blob, `"try_duration":"30s"`)
+	mustContain(t, blob, `"try_interval":"250ms"`)
+
+	if strings.Contains(blob, `"selection_policy"`) {
+		t.Errorf("single-upstream route should not carry a selection policy: %s", blob)
 	}
 
 	if strings.Contains(blob, `"health_checks"`) {
@@ -548,4 +550,18 @@ func TestBuildCaddyConfig_NoSkipWithoutOnDemandWildcard(t *testing.T) {
 	if strings.Contains(blob, "skip_certificates") {
 		t.Fatalf("no on-demand wildcard, no skip: %s", blob)
 	}
+}
+
+func TestBuildCaddyConfig_EdgeErrorPageFor502To504(t *testing.T) {
+	routes := []Route{
+		{App: "api", Host: "api.example.com", Upstream: "api:3000"},
+	}
+
+	blob := marshal(t, BuildCaddyConfig(routes))
+
+	mustContain(t, blob, `"errors":{"routes"`)
+	mustContain(t, blob, `{http.error.status_code} \u003e= 502`)
+	mustContain(t, blob, `"status_code":"{http.error.status_code}"`)
+	mustContain(t, blob, `Voltamos em instantes`)
+	mustContain(t, blob, `"Retry-After":["5"]`)
 }
